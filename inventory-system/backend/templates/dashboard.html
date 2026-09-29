@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LedgerLens Inventory</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+</head>
+<body data-poll-ms="{{ poll_seconds * 1000 }}" data-detection-ms="{{ detection_seconds * 1000 }}">
+  <main id="login" class="login-card">
+    <h1>LedgerLens</h1><p>Real-time inventory management</p>
+    <form id="login-form"><label>Username<input name="username" required autocomplete="username"></label><label>Password<input name="password" type="password" required autocomplete="current-password"></label><button>Sign in</button></form>
+    <p id="login-error" class="message error" hidden></p><small>Demo: manager / manager123</small>
+  </main>
+
+  <div id="app" class="app-shell" hidden>
+    <aside><h1>LedgerLens</h1><p class="muted">Inventory workspace</p>
+      <nav>
+        <button data-view="dashboard" class="active">Dashboard</button><button data-view="camera">Camera monitor</button><button data-view="inventory">Inventory</button><button data-view="pos">Point of sale</button><button data-view="analytics">Analytics</button><button data-view="users" data-manager-only>Users</button>
+      </nav>
+      <div class="sidebar-bottom"><span id="current-user"></span><button id="logout" class="quiet">Sign out</button></div>
+    </aside>
+    <section class="content"><header><div><h2 id="page-title">Dashboard</h2><p id="connection" class="muted">Updating every {{ poll_seconds }} seconds</p></div><div id="camera-chip" class="camera-chip">Camera off</div></header>
+      <div id="toast" class="toast" hidden></div>
+
+      <section class="view active" id="dashboard-view">
+        <div id="alert-banner" class="alert-banner" hidden></div>
+        <div class="stats"><article><span>Products monitored</span><strong id="stat-products">—</strong></article><article><span>Low-stock items</span><strong id="stat-low">—</strong></article><article><span>Last refresh</span><strong id="last-refresh">—</strong></article></div>
+        <div class="grid two"><article><h3>Live inventory</h3><table><thead><tr><th>Product</th><th>On hand</th><th>Burn/day</th><th>Forecast</th><th>Status</th></tr></thead><tbody id="stock-table"></tbody></table></article><article><h3>Restock suggestions</h3><div id="suggestions"></div></article></div>
+        <article><h3>Recent alerts</h3><div id="alerts"></div></article>
+      </section>
+
+      <section class="view" id="camera-view"><div class="camera-page-head"><div><h3>Live shelf camera</h3><p>YOLO26 Nano scans one frame every {{ detection_seconds }} seconds. The camera stays live while you use other pages.</p></div><button id="camera-toggle">Start camera</button></div>
+        <div class="camera-layout"><div class="video-wrap" id="video-wrap"><video id="camera-video" autoplay muted playsinline></video><canvas id="detection-overlay"></canvas><p id="camera-placeholder">Start the camera to view the shelf.</p></div><article><h3 id="camera-status">Ready</h3><p id="camera-notice" class="muted">No frame scanned yet.</p><h4>Detected items</h4><div id="detections">No detections yet.</div></article></div>
+      </section>
+
+      <section class="view" id="inventory-view"><div class="toolbar"><input id="inventory-search" placeholder="Search products"><button id="inventory-refresh" class="quiet">Refresh</button></div><article><h3>Inventory counts</h3><table><thead><tr><th>Product</th><th>SKU</th><th>Price</th><th>On hand</th><th>Status</th></tr></thead><tbody id="inventory-table"></tbody></table></article><article class="form-card"><h3>Receive stock</h3><form id="receive-form"><select id="receive-product" required></select><input id="receive-quantity" type="number" min="1" value="1" required><input id="receive-note" placeholder="Note (optional)"><button>Record receipt</button></form></article></section>
+
+      <section class="view" id="pos-view"><div class="grid two"><article><h3>Point of sale</h3><input id="pos-search" class="pos-search" placeholder="Search by product name, SKU, barcode or ID"><div id="pos-products" class="product-list"></div></article><article class="pos-panel"><h3>Current sale</h3><div id="cart">Your cart is empty.</div><div class="cart-total">Total: <strong id="cart-total">$0.00</strong></div><button id="checkout">Complete sale</button><section id="receipt" class="receipt" hidden><h3>LedgerLens receipt</h3><div id="receipt-content"></div><button id="print-receipt" class="quiet">Print receipt</button></section></article></div></section>
+      <section class="view" id="analytics-view"><article><h3>Sales analysis</h3><div class="analytics-filter"><label>From<input id="analytics-from" type="date"></label><label>To<input id="analytics-to" type="date"></label><label>Product<select id="analytics-product"></select></label><button id="analytics-run">Analyse</button></div><div id="sales-summary"></div><div id="sales-trend" class="trend"></div></article><article><h3>Most purchased products</h3><div id="most-purchased"></div><div id="season-suggestion" class="season-note"></div></article></section>
+      <section class="view" id="users-view"><article><h3>User management</h3><form id="new-user-form" class="form-card"><input name="full_name" placeholder="Full name" required><input name="username" placeholder="Username" required><input name="password" type="password" placeholder="Temporary password" required><select name="role"><option value="sales">Sales</option><option value="accountant">Accountant</option><option value="manager">Manager</option><option value="admin">Administrator</option></select><button>Add user</button></form><div id="users-list"></div></article></section>
+    </section>
+    <div id="persistent-camera" aria-live="polite"><video id="mini-camera" muted playsinline></video><span id="mini-camera-label">Camera off</span></div>
+  </div>
+  <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>
