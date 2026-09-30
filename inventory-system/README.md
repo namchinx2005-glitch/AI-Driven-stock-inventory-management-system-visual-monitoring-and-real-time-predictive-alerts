@@ -56,9 +56,12 @@ Set `DETECTION_SOURCE = "simulated"` in `config.py` — no webcam, no `opencv-py
 
 ## Switching on SMS and email alerts
 
-Critical low-stock alerts are sent to `+263784005655` by Textbee and to
+Warning and critical low-stock alerts are sent to `+263784005655` by Textbee and to
 `namchinx2005@gmail.com` by email. They are triggered after a POS sale, a stock-count update,
-or a confirmed camera count, and repeat no more than once an hour per product.
+or a confirmed camera count, and a background worker continues checking inventory every minute.
+An out-of-stock (**CRITICAL/RISK**) item is re-alerted every **10 minutes**; a low-but-nonzero
+(**WARNING**) item is re-alerted every **30 minutes**, per product. Entering critical stock
+always sends an immediate escalation, even if a warning was sent recently.
 
 Before starting the backend, set the delivery credentials in your terminal. Do not put these
 secrets in `config.py`:

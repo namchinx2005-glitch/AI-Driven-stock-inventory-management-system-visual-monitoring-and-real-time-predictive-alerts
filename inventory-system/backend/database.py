@@ -123,6 +123,13 @@ def init_db():
                 last_sent TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS alert_dispatch_log (
+                product_id TEXT NOT NULL,
+                level TEXT NOT NULL,
+                last_sent TEXT NOT NULL,
+                PRIMARY KEY (product_id, level)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_stock_product_ts ON stock_logs(product_id, timestamp);
             CREATE INDEX IF NOT EXISTS idx_sales_product_ts ON sales_events(product_id, timestamp);
             CREATE INDEX IF NOT EXISTS idx_sales_user ON sales_events(user_id);
@@ -269,24 +276,35 @@ def get_recent_alerts(limit: int = 20):
         return [dict(r) for r in rows]
 
 
-def get_last_sms_timestamp(product_id: str):
+def get_last_alert_timestamp(product_id: str, level: str):
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT last_sent FROM sms_dispatch_log WHERE product_id = ?", (product_id,)
+            "SELECT last_sent FROM alert_dispatch_log WHERE product_id = ? AND level = ?",
+            (product_id, level),
         ).fetchone()
         return datetime.fromisoformat(row["last_sent"]) if row else datetime.min
 
 
-def update_sms_timestamp(product_id: str, ts: datetime = None):
+def update_alert_timestamp(product_id: str, level: str, ts: datetime = None):
     ts = ts or datetime.utcnow()
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO sms_dispatch_log (product_id, last_sent) VALUES (?, ?)
-            ON CONFLICT(product_id) DO UPDATE SET last_sent = excluded.last_sent
+            INSERT INTO alert_dispatch_log (product_id, level, last_sent) VALUES (?, ?, ?)
+            ON CONFLICT(product_id, level) DO UPDATE SET last_sent = excluded.last_sent
             """,
-            (product_id, ts.isoformat()),
+            (product_id, level, ts.isoformat()),
         )
+
+
+# Compatibility aliases for integrations that used the original critical-only
+# dispatch log. New alert code should use the level-aware functions above.
+def get_last_sms_timestamp(product_id: str):
+    return get_last_alert_timestamp(product_id, "CRITICAL")
+
+
+def update_sms_timestamp(product_id: str, ts: datetime = None):
+    update_alert_timestamp(product_id, "CRITICAL", ts)
 
 
 # User Management Functions

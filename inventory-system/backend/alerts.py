@@ -33,14 +33,27 @@ def _label_for(product_id: str) -> str:
     return product["name"] if product else product_id
 
 
-def _dispatch_sms(product_id: str, current_stock: int) -> bool:
+def _alert_text(product_id: str, current_stock: int, level: str) -> tuple[str, str]:
     label = _label_for(product_id)
-    message = f"[Inventory Alert] {label} is critically low: {current_stock} units remaining."
+    if level == "CRITICAL":
+        return label, f"[Inventory Alert: CRITICAL] {label} has {current_stock} unit(s) remaining. Restock immediately."
+    return label, f"[Inventory Alert: WARNING] {label} is low: {current_stock} unit(s) remaining. Please plan a restock."
+
+
+def _reminder_interval(level: str) -> int:
+    """Return the repeat interval for an alert severity."""
+    if level == "CRITICAL":
+        return config.CRITICAL_ALERT_REMINDER_SECONDS
+    return config.WARNING_ALERT_REMINDER_SECONDS
+
+
+def _dispatch_sms(product_id: str, current_stock: int, level: str) -> bool:
+    _, message = _alert_text(product_id, current_stock, level)
 
     dry_run = not (config.TEXTBEE_API_KEY and config.TEXTBEE_DEVICE_ID and config.ALERT_PHONE_NUMBER)
     if dry_run:
         log.info("DRY-RUN SMS (Textbee not configured): %s", message)
-        return True  # counted as "sent" for demo/testing purposes; message is logged, not delivered
+        return False
 
     try:
         payload = json.dumps(
@@ -60,6 +73,15 @@ def _dispatch_sms(product_id: str, current_stock: int) -> bool:
             if not 200 <= response.status < 300:
                 log.error("Textbee dispatch failed for %s: HTTP %s", product_id, response.status)
                 return False
+            # Textbee can accept the HTTP request but report that no recipient
+            # was pushed to the Android gateway. Treat that as a failed send.
+            result = json.loads(response.read().decode("utf-8") or "{}")
+            result_data = result.get("data", result)
+            failures = result_data.get("failureCount", 0) if isinstance(result_data, dict) else 0
+            successes = result_data.get("successCount") if isinstance(result_data, dict) else None
+            if failures or successes == 0:
+                log.error("Textbee accepted no SMS for %s: %s", product_id, result)
+                return False
         return True
     except HTTPError as exc:
         log.error("Textbee dispatch failed for %s: HTTP %s", product_id, exc.code)
@@ -72,10 +94,9 @@ def _dispatch_sms(product_id: str, current_stock: int) -> bool:
         return False
 
 
-def _dispatch_email(product_id: str, current_stock: int) -> bool:
-    """Send the same critical alert by email, or log it while unconfigured."""
-    label = _label_for(product_id)
-    message = f"Inventory alert: {label} is critically low ({current_stock} units remaining)."
+def _dispatch_email(product_id: str, current_stock: int, level: str) -> bool:
+    """Send a warning or critical alert by email, or log it while unconfigured."""
+    label, message = _alert_text(product_id, current_stock, level)
     if not (
         config.SMTP_HOST
         and config.ALERT_EMAIL_TO
@@ -83,10 +104,10 @@ def _dispatch_email(product_id: str, current_stock: int) -> bool:
         and config.SMTP_PASSWORD
     ):
         log.info("DRY-RUN email: %s", message)
-        return True
+        return False
     try:
         email = EmailMessage()
-        email["Subject"] = f"Critical inventory alert — {label}"
+        email["Subject"] = f"{level.title()} inventory alert — {label}"
         email["From"] = config.SMTP_USERNAME or "inventory@localhost"
         email["To"] = config.ALERT_EMAIL_TO
         email.set_content(message)
@@ -109,11 +130,13 @@ def evaluate_alerts(counts: dict):
     alert latency described in the corrected Ch3 §3.5.3.
     """
     for product_id, current_stock in counts.items():
-        safety, buffer = _thresholds_for(product_id)
+        _safety, buffer = _thresholds_for(product_id)
 
-        if current_stock <= safety:
+        # A risk/critical alert means the product is completely unavailable.
+        # Any positive count inside the low-stock range is a warning instead.
+        if current_stock <= 0:
             level = "CRITICAL"
-        elif current_stock <= safety + buffer:
+        elif current_stock <= _safety + buffer:
             level = "WARNING"
         else:
             continue
@@ -121,13 +144,25 @@ def evaluate_alerts(counts: dict):
         label = _label_for(product_id)
         message = f"{label}: {current_stock} units ({level})"
 
+        # Level-specific cooldowns ensure that moving from WARNING to CRITICAL
+        # always produces an immediate escalation. Critical means no units are
+        # left and repeats every 10 minutes; warnings repeat every 30 minutes.
         sms_sent = False
-        if level == "CRITICAL":
-            last_sent = database.get_last_sms_timestamp(product_id)
-            if datetime.utcnow() - last_sent >= timedelta(seconds=config.ALERT_COOLDOWN_SECONDS):
-                sms_sent = _dispatch_sms(product_id, current_stock)
-                _dispatch_email(product_id, current_stock)
-                if sms_sent:
-                    database.update_sms_timestamp(product_id)
+        last_sent = database.get_last_alert_timestamp(product_id, level)
+        if datetime.utcnow() - last_sent >= timedelta(seconds=_reminder_interval(level)):
+            sms_sent = _dispatch_sms(product_id, current_stock, level)
+            email_sent = _dispatch_email(product_id, current_stock, level)
+            # Record the dispatch attempt, not just a successful response. This
+            # preserves the 10/30-minute cadence if a provider is temporarily
+            # unavailable instead of retrying every one-minute scan.
+            database.update_alert_timestamp(product_id, level)
+            database.record_alert(product_id, level, message, sms_sent)
 
-        database.record_alert(product_id, level, message, sms_sent)
+
+def evaluate_current_inventory_alerts():
+    """Evaluate every saved product count for the periodic reminder worker."""
+    counts = {
+        product["product_id"]: database.get_latest_count(product["product_id"]) or 0
+        for product in database.get_all_products()
+    }
+    evaluate_alerts(counts)

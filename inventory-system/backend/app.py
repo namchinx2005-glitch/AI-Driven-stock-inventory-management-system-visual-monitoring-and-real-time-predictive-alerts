@@ -26,7 +26,7 @@ from camera_worker import (
     run_detection_loop,
     unknown_detections_per_region,
 )
-from alerts import evaluate_alerts
+from alerts import evaluate_alerts, evaluate_current_inventory_alerts
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("app")
@@ -38,6 +38,18 @@ _stop_event = threading.Event()
 # Used when the browser owns the camera. It gives the visible Camera Monitor
 # the same stable-count reconciliation as the dedicated background worker.
 _browser_shelf_reconciler = ShelfReconciler()
+
+
+def _low_stock_reminder_loop():
+    """Keep sending due low-stock reminders even when inventory is idle."""
+    log.info("Low-stock email reminder worker started (checking every %s seconds).",
+             config.LOW_STOCK_ALERT_SCAN_SECONDS)
+    while not _stop_event.is_set():
+        try:
+            evaluate_current_inventory_alerts()
+        except Exception:  # Keep the reminder worker alive after a transient failure.
+            log.exception("Low-stock reminder scan failed")
+        _stop_event.wait(config.LOW_STOCK_ALERT_SCAN_SECONDS)
 
 
 @app.route("/")
@@ -105,7 +117,9 @@ def api_stock():
         safety = config.DEFAULT_SAFETY_THRESHOLD
         buffer = config.DEFAULT_WARNING_BUFFER
         count = prediction["current_stock"]
-        status = "CRITICAL" if count <= safety else "WARNING" if count <= safety + buffer else "HEALTHY"
+        # CRITICAL/RISK is reserved for an empty shelf. Positive low stock is
+        # a warning, matching the email reminder policy.
+        status = "CRITICAL" if count <= 0 else "WARNING" if count <= safety + buffer else "HEALTHY"
         out.append(
             {
                 "product_id": pid,
@@ -581,8 +595,16 @@ def start_background_worker():
     return thread
 
 
+def start_low_stock_reminder_worker():
+    thread = threading.Thread(target=_low_stock_reminder_loop, daemon=True,
+                              name="low-stock-reminder")
+    thread.start()
+    return thread
+
+
 if __name__ == "__main__":
     database.init_db()
+    start_low_stock_reminder_worker()
     if config.START_CAMERA_WORKER_ON_BOOT:
         start_background_worker()
     else:

@@ -83,7 +83,14 @@ LSTM_MIN_DAYS_REQUIRED = 10
 # --- Alerting thresholds (per product; falls back to DEFAULT if not listed) ---
 DEFAULT_SAFETY_THRESHOLD = 3
 DEFAULT_WARNING_BUFFER = 3
-ALERT_COOLDOWN_SECONDS = 1800  # 30 minutes between repeat alerts for the same product
+# A completely empty shelf is an urgent risk alert.  Low (but non-zero) stock
+# remains a warning.  These are deliberately separate so a critical alert is
+# not delayed by a prior warning for the same SKU.
+CRITICAL_ALERT_REMINDER_SECONDS = int(os.getenv("CRITICAL_ALERT_REMINDER_SECONDS", "600"))
+WARNING_ALERT_REMINDER_SECONDS = int(os.getenv("WARNING_ALERT_REMINDER_SECONDS", "1800"))
+# Check persisted inventory even when no POS sale or camera detection occurs;
+# this makes reminder delivery independent of user activity.
+LOW_STOCK_ALERT_SCAN_SECONDS = int(os.getenv("LOW_STOCK_ALERT_SCAN_SECONDS", "60"))
 
 # --- Alert delivery ---
 # Textbee sends SMS through the registered Android device and its SIM.  Keep
