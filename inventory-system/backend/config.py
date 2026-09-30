@@ -80,6 +80,15 @@ BURN_RATE_WINDOW_DAYS = 7
 LSTM_WINDOW_SIZE = 5
 LSTM_MIN_DAYS_REQUIRED = 10
 
+# --- Restock intelligence ---
+# Reorder targets cover supplier lead time plus a safety buffer. Seasonal
+# beverage adjustments are evidence-based and remain neutral until enough
+# observed sales data exists for a comparison.
+RESTOCK_LOOKBACK_DAYS = 30
+RESTOCK_LEAD_TIME_DAYS = 7
+RESTOCK_SAFETY_DAYS = 5
+SEASONAL_VALIDATION_MIN_ACTIVE_DAYS = 14
+
 # --- Alerting thresholds (per product; falls back to DEFAULT if not listed) ---
 DEFAULT_SAFETY_THRESHOLD = 3
 DEFAULT_WARNING_BUFFER = 3

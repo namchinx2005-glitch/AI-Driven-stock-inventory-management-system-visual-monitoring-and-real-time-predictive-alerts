@@ -144,48 +144,26 @@ def api_alerts():
 
 @app.route("/api/restock-suggestions", methods=["GET", "OPTIONS"])
 def api_restock_suggestions():
-    """Rank reorder advice using on-hand stock, velocity, trend and season."""
+    """Rank evidence-based reorder advice using stock, sales and lead time."""
     if request.method == "OPTIONS":
         return "", 200
         
-    suggestions = []
-    # Zimbabwe's hot/rainy retail period runs broadly September–March. The
-    # seasonal uplift is deliberately limited to beverage-like catalog items;
-    # sales velocity remains the main ordering signal.
-    warm_season = date.today().month in (9, 10, 11, 12, 1, 2, 3)
-    for product in database.get_all_products():
-        pid = product["product_id"]
-        prediction = forecasting.predict_depletion(pid)
-        trend = database.get_sales_trend(pid)
-        recent, previous = trend["recent"], trend["previous"]
-        is_beverage = any(word in f"{product['name']} {product.get('category') or ''}".lower()
-                          for word in ("drink", "juice", "water", "beverage", "soda"))
-        seasonal_multiplier = 1.30 if warm_season and is_beverage else 1.0
-        base_weekly_demand = max(prediction["burn_rate"] * 7, float(recent))
-        suggested_quantity = max(0, math.ceil(base_weekly_demand * seasonal_multiplier - prediction["current_stock"]))
-        trend_up = recent > previous and recent > 0
-        if prediction["current_stock"] == 0:
-            action = "Restock immediately — out of stock"
-        elif suggested_quantity > 0:
-            action = "Reorder now" if trend_up or prediction["days_remaining"] is not None and prediction["days_remaining"] <= 3 else "Plan a reorder"
-        else:
-            action = "Monitor"
-        if suggested_quantity or prediction["current_stock"] == 0 or trend_up:
-            suggestions.append(
-                {
-                    "product_id": pid,
-                    "label": product["name"],
-                    "days_remaining": prediction["days_remaining"],
-                    "depletion_date": prediction["depletion_date"],
-                    "suggested_quantity": suggested_quantity,
-                    "recent_sales": recent,
-                    "previous_sales": previous,
-                    "seasonal_factor": "Hot/rainy-season beverage uplift" if warm_season and is_beverage else None,
-                    "suggested_action": action,
-                }
-            )
+    all_recommendations = [forecasting.restock_recommendation(product) for product in database.get_all_products()]
+    suggestions = [item for item in all_recommendations if item["suggested_quantity"] or item["current_stock"] == 0 or item["recent_sales"] > item["previous_sales"]]
     suggestions.sort(key=lambda s: (s["suggested_action"] != "Restock immediately — out of stock", -(s["suggested_quantity"] or 0), -s["recent_sales"]))
     return jsonify(suggestions)
+
+
+@app.route("/api/restock-review", methods=["GET", "POST"])
+@require_auth
+def api_restock_review():
+    """Show or record the manager's weekly review of reorder quantities."""
+    if request.method == "GET":
+        return jsonify(database.get_restock_review_status())
+    if request.user.get("role") not in ("admin", "manager"):
+        return jsonify({"error": "Administrator or manager access required"}), 403
+    data = request.get_json(silent=True) or {}
+    return jsonify(database.record_restock_review(request.user["user_id"], data.get("notes", "")))
 
 
 @app.route("/api/burn-rate/<product_id>", methods=["GET", "OPTIONS"])

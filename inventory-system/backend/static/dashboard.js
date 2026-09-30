@@ -41,23 +41,25 @@
   async function refresh() {
     if (!token) return;
     try {
-      const [nextStock, alerts, suggestions] = await Promise.all([json('/api/stock'), json('/api/alerts'), json('/api/restock-suggestions')]);
-      stock = nextStock; renderDashboard(alerts, suggestions); renderInventory();
+      const [nextStock, alerts, suggestions, review] = await Promise.all([json('/api/stock'), json('/api/alerts'), json('/api/restock-suggestions'), json('/api/restock-review')]);
+      stock = nextStock; renderDashboard(alerts, suggestions, review); renderInventory();
       $('#connection').textContent = `Live · refreshed ${new Date().toLocaleTimeString()}`;
       const newest = alerts[0];
       if (newest && newest.id !== lastAlertId) { if (lastAlertId !== null) message(`Inventory alert: ${newest.message}`); lastAlertId = newest.id; }
     } catch (err) { $('#connection').textContent = `Connection issue: ${err.message}`; }
   }
-  function renderDashboard(alerts, suggestions) {
+  function renderDashboard(alerts, suggestions, review) {
     $('#stat-products').textContent = stock.length;
     $('#stat-low').textContent = stock.filter(x => x.status !== 'HEALTHY').length;
     $('#last-refresh').textContent = new Date().toLocaleTimeString();
     $('#stock-table').innerHTML = stock.map(x => `<tr><td>${escape(x.label)}</td><td>${x.current_stock}</td><td>${Number(x.burn_rate_per_day || 0).toFixed(1)}</td><td>${escape(x.depletion_date || '—')}</td><td class="status ${x.status}">${x.status}</td></tr>`).join('') || '<tr><td colspan="5">No inventory records.</td></tr>';
-    $('#suggestions').innerHTML = suggestions.map(x => `<div class="suggestion"><strong>${escape(x.label)}</strong><br><span class="muted">${escape(x.suggested_action)} · buy ${x.suggested_quantity ?? 0} · ${x.recent_sales ?? 0} sold this week${x.seasonal_factor ? ` · ${escape(x.seasonal_factor)}` : ''}</span></div>`).join('') || 'No restock suggestions.';
+    $('#suggestions').innerHTML = suggestions.map(x => { const seasonal = x.seasonal_validation || {}; const factor = seasonal.validated ? ` · seasonal factor ${Number(x.seasonal_multiplier).toFixed(2)} (validated)` : (seasonal.reason ? ` · ${escape(seasonal.reason)}` : ''); return `<div class="suggestion"><strong>${escape(x.label)}</strong><br><span class="muted">${escape(x.suggested_action)} · buy ${x.suggested_quantity ?? 0} · target ${x.target_stock ?? 0} · ${Number(x.daily_burn_rate || 0).toFixed(1)}/day${factor}</span><br><small class="muted">${escape(x.data_quality || '')}</small></div>`; }).join('') || 'No restock suggestions.';
+    const manager = ['manager', 'admin'].includes(user.role); const reviewText = review.reviewed ? `Reviewed for week of ${escape(review.review_week)}${review.review?.reviewed_at ? ` · ${new Date(review.review.reviewed_at).toLocaleString()}` : ''}` : `Weekly review due for week of ${escape(review.review_week)}.`; $('#restock-review').innerHTML = `<strong>${reviewText}</strong><br><span class="muted">Review reorder quantities weekly; record deliveries and POS sales daily before approving orders.</span>${manager && !review.reviewed ? '<br><button id="mark-restock-reviewed" class="quiet">Mark this week reviewed</button>' : ''}`; $('#mark-restock-reviewed')?.addEventListener('click', markRestockReviewed);
     $('#alerts').innerHTML = alerts.map(x => `<div class="alert-row"><strong>${x.level}</strong> — ${escape(x.message)}<br><small class="muted">${escape(x.timestamp)}</small></div>`).join('') || 'No recent alerts.';
     const critical = stock.filter(x => x.status === 'CRITICAL'); const banner = $('#alert-banner');
     banner.hidden = !critical.length; banner.textContent = critical.length ? `Action required: ${critical.map(x => x.label).join(', ')} is below its safety threshold.` : '';
   }
+  async function markRestockReviewed() { try { await json('/api/restock-review', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({notes:'Reviewed in dashboard'})}); message('Weekly restock review recorded.'); refresh(); } catch (err) { message(err.message); } }
   async function loadProducts() {
     try { products = await json('/api/products'); renderInventory(); renderPOS(); fillProductSelects(); } catch (err) { message(err.message); }
   }
@@ -126,6 +128,5 @@
   $('#new-user-form').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.target);try{const result=await json('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(form))});message(result.message);event.target.reset();renderUsers();}catch(err){message(err.message);}};
   setInterval(refresh,pollMs); setInterval(scan,detectionMs); if(token && user) showApp();
 })();
-
 
 

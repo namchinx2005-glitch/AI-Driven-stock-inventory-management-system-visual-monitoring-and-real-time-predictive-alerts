@@ -10,6 +10,26 @@ from datetime import datetime, timedelta
 DB_PATH = "inventory.db"
 _lock = threading.Lock()
 
+_CATEGORY_ALIASES = {
+    "beverage": "Beverages", "beverages": "Beverages", "drink": "Beverages",
+    "drinks": "Beverages", "soft drink": "Beverages", "soft drinks": "Beverages",
+    "pantry": "Pantry", "cooking": "Cooking", "dairy": "Dairy", "snack": "Snacks",
+    "snacks": "Snacks",
+}
+_BEVERAGE_TERMS = ("drink", "juice", "water", "beverage", "soda", "cola", "tea")
+
+
+def normalize_category(category: str | None, product_name: str = "") -> str:
+    """Return a single display/category key, inferring only known beverages."""
+    raw = (category or "").strip()
+    normalized = _CATEGORY_ALIASES.get(raw.casefold())
+    if normalized:
+        return normalized
+    name_and_category = f"{product_name} {raw}".casefold()
+    if any(term in name_and_category for term in _BEVERAGE_TERMS):
+        return "Beverages"
+    return raw.title() if raw else "Uncategorized"
+
 
 def _connect():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -130,6 +150,14 @@ def init_db():
                 PRIMARY KEY (product_id, level)
             );
 
+            CREATE TABLE IF NOT EXISTS restock_reviews (
+                review_week TEXT PRIMARY KEY,
+                reviewed_by INTEGER,
+                notes TEXT NOT NULL DEFAULT '',
+                reviewed_at TEXT NOT NULL,
+                FOREIGN KEY (reviewed_by) REFERENCES users(id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_stock_product_ts ON stock_logs(product_id, timestamp);
             CREATE INDEX IF NOT EXISTS idx_sales_product_ts ON sales_events(product_id, timestamp);
             CREATE INDEX IF NOT EXISTS idx_sales_user ON sales_events(user_id);
@@ -170,6 +198,15 @@ def init_db():
                        created_at, is_active FROM users_legacy;
                 DROP TABLE users_legacy;
             """)
+
+        # Existing catalogues may use Drinks, drink, or a blank category. Keep
+        # categories consistent so beverage analysis is reliable.
+        rows = conn.execute("SELECT product_id, name, category FROM products").fetchall()
+        for row in rows:
+            category = normalize_category(row["category"], row["name"])
+            if category != (row["category"] or ""):
+                conn.execute("UPDATE products SET category = ?, updated_at = ? WHERE product_id = ?",
+                             (category, datetime.utcnow().isoformat(), row["product_id"]))
 
 
 def write_stock_log(product_id: str, count: int, ts: str = None):
@@ -369,6 +406,7 @@ def delete_user(user_id: int):
 # Product Management Functions
 def create_product(product_id: str, name: str, description: str = None, price: float = 0.0, 
                    category: str = None, sku: str = None, barcode: str = None, image_url: str = None):
+    category = normalize_category(category, name)
     with get_conn() as conn:
         conn.execute(
             """
@@ -394,6 +432,12 @@ def get_all_products():
 
 
 def update_product(product_id: str, **kwargs):
+    if "category" in kwargs or "name" in kwargs:
+        existing = get_product(product_id)
+        if not existing:
+            return False
+        kwargs["category"] = normalize_category(kwargs.get("category", existing["category"]),
+                                                 kwargs.get("name", existing["name"]))
     allowed_fields = ['name', 'description', 'price', 'category', 'sku', 'barcode', 'image_url']
     updates = [f"{k} = ?" for k in kwargs.keys() if k in allowed_fields]
     if not updates:
@@ -498,6 +542,64 @@ def get_sales_trend(product_id: str, recent_days: int = 7):
             (recent_start, previous_start, recent_start, product_id),
         ).fetchone()
     return {"recent": row["recent"], "previous": row["previous"]}
+
+
+def get_restock_data_quality(product_id: str, days: int = 30):
+    """Expose whether the sales and physical-count inputs are fresh enough."""
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    with get_conn() as conn:
+        sales = conn.execute(
+            "SELECT COUNT(DISTINCT date(timestamp)) AS active_days, COALESCE(SUM(qty_sold), 0) AS units "
+            "FROM sales_events WHERE product_id = ? AND timestamp >= ?", (product_id, since)
+        ).fetchone()
+        stock = conn.execute(
+            "SELECT timestamp FROM stock_logs WHERE product_id = ? ORDER BY timestamp DESC LIMIT 1", (product_id,)
+        ).fetchone()
+    stock_timestamp = stock["timestamp"] if stock else None
+    stock_current = bool(stock_timestamp and stock_timestamp >= (datetime.utcnow() - timedelta(days=7)).isoformat())
+    return {"sales_active_days": sales["active_days"], "sales_units": sales["units"],
+            "lookback_days": days, "stock_timestamp": stock_timestamp, "stock_current": stock_current}
+
+
+def get_beverage_seasonal_observations(target_months: tuple[int, ...], baseline_months: tuple[int, ...]):
+    """Observed beverage demand by calendar-day with no assumed seasonal uplift."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT CAST(strftime('%m', se.timestamp) AS INTEGER) AS month,
+                      date(se.timestamp) AS day, SUM(se.qty_sold) AS units
+               FROM sales_events se JOIN products p ON p.product_id = se.product_id
+               WHERE p.category = 'Beverages'
+               GROUP BY day, month"""
+        ).fetchall()
+    target = [row["units"] for row in rows if row["month"] in target_months]
+    baseline = [row["units"] for row in rows if row["month"] in baseline_months]
+    return {"target_days": len(target), "baseline_days": len(baseline),
+            "target_units": sum(target), "baseline_units": sum(baseline)}
+
+
+def _review_week(day: datetime = None) -> str:
+    day = day or datetime.utcnow()
+    return (day.date() - timedelta(days=day.weekday())).isoformat()
+
+
+def get_restock_review_status():
+    week = _review_week()
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM restock_reviews WHERE review_week = ?", (week,)).fetchone()
+    return {"review_week": week, "reviewed": bool(row), "review": dict(row) if row else None}
+
+
+def record_restock_review(user_id: int, notes: str = ""):
+    now = datetime.utcnow().isoformat()
+    week = _review_week()
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO restock_reviews (review_week, reviewed_by, notes, reviewed_at) VALUES (?, ?, ?, ?)
+               ON CONFLICT(review_week) DO UPDATE SET reviewed_by = excluded.reviewed_by,
+                   notes = excluded.notes, reviewed_at = excluded.reviewed_at""",
+            (week, user_id, notes.strip(), now),
+        )
+    return get_restock_review_status()
 
 
 def get_pos_transactions(limit: int = 50, user_id: int = None):
