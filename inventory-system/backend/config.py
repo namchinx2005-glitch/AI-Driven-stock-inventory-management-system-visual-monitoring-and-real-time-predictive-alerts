@@ -6,26 +6,12 @@ Interval: 2 seconds, per Ch1 §1.5 Objective 1.
 """
 
 import os
+from dotenv import load_dotenv
 
 
-def _load_local_env() -> None:
-    """Load backend/.env for local development without overriding real env vars."""
-    env_path = os.path.join(os.path.dirname(__file__), ".env")
-    try:
-        with open(env_path, encoding="utf-8") as env_file:
-            for line in env_file:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                key, value = key.strip(), value.strip().strip('"').strip("'")
-                if key:
-                    os.environ.setdefault(key, value)
-    except FileNotFoundError:
-        pass
-
-
-_load_local_env()
+# Keep deployment-provided variables authoritative while loading backend/.env
+# automatically for local development.
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), override=False)
 
 DETECTION_MODEL_NAME = "YOLO26n / custom shelf dataset"
 # Put the fine-tuned `yolo26n.pt` in backend/ before enabling camera inference.
@@ -120,6 +106,10 @@ SMTP_USERNAME = os.getenv("SMTP_USERNAME", "namchinx2005@gmail.com")
 # either the grouped or plain 16-character form works when set in the shell.
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").replace(" ", "")
 ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "namchinx2005@gmail.com")
+
+# Authentication --- set this in .env for every non-development deployment.
+JWT_SECRET = os.getenv("JWT_SECRET", "development-only-change-this-secret")
+JWT_EXPIRATION_HOURS = int(os.getenv("JWT_EXPIRATION_HOURS", "24"))
 
 # --- Detection source: "simulated" (no camera needed) or "camera" (real webcam + YOLO26) ---
 DETECTION_SOURCE = "camera"

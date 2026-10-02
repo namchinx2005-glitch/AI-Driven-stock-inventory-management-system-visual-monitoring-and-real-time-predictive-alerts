@@ -6,12 +6,13 @@ import hashlib
 import secrets
 import database
 import jwt
+import config
 from datetime import datetime, timedelta
 
-# Secret key for JWT token generation (in production, use environment variable)
-JWT_SECRET = "your-secret-key-change-in-production"
+# JWT values are loaded by python-dotenv through config.py.
+JWT_SECRET = config.JWT_SECRET
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_HOURS = 24
+JWT_EXPIRATION_HOURS = config.JWT_EXPIRATION_HOURS
 
 
 def hash_password(password: str) -> str:
