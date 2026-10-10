@@ -13,7 +13,19 @@ import {
   Legend
 } from 'recharts';
 
-const COLORS = ['#2F6D4F', '#2E6FE5', '#B4791C', '#B23A2E', '#6366F1', '#8B5CF6'];
+// Claymorphism chart palette: soft, saturated pastels
+const COLORS = ['#6C5CE7', '#4FD1A5', '#FFB48A', '#7CC4FF', '#FF8FA3', '#FFD66B'];
+const GRID = '#D9DCF3';
+const TICK = { fontSize: 12, fill: '#656989', fontWeight: 600 };
+const TOOLTIP_STYLE = {
+  background: '#F5F6FF',
+  border: 'none',
+  borderRadius: 16,
+  boxShadow: '6px 6px 16px rgba(122, 128, 184, 0.35), -4px -4px 12px rgba(255, 255, 255, 0.9)',
+  fontSize: 12,
+  fontWeight: 700,
+  color: '#2B2D4A',
+};
 
 export default function Analytics({ user, onBack, canGoBack }) {
   const [mostPurchased, setMostPurchased] = useState([]);
@@ -94,11 +106,11 @@ export default function Analytics({ user, onBack, canGoBack }) {
           ) : (
             <ResponsiveContainer width="100%" height={300}>
               <BarChart data={mostPurchased}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="name" angle={-45} textAnchor="end" height={100} />
-                <YAxis />
-                <Tooltip />
-                <Bar dataKey="total_sold" fill="#2F6D4F" />
+                <CartesianGrid stroke={GRID} strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="name" angle={-45} textAnchor="end" height={100} tick={TICK} tickLine={false} axisLine={{ stroke: GRID }} />
+                <YAxis tick={TICK} tickLine={false} axisLine={false} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'rgba(108, 92, 231, 0.08)' }} />
+                <Bar dataKey="total_sold" fill="#6C5CE7" radius={[12, 12, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           )}
@@ -119,15 +131,17 @@ export default function Analytics({ user, onBack, canGoBack }) {
                   labelLine={false}
                   label={({ category, percent }) => `${category} ${(percent * 100).toFixed(0)}%`}
                   outerRadius={80}
-                  fill="#8884d8"
+                  fill="#6C5CE7"
                   dataKey="total_sold"
+                  stroke="#F5F6FF"
+                  strokeWidth={4}
                 >
                   {salesByCategory.map((entry, index) => (
                     <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                   ))}
                 </Pie>
-                <Tooltip />
-                <Legend />
+                <Tooltip contentStyle={TOOLTIP_STYLE} />
+                <Legend wrapperStyle={{ fontSize: 12, fontWeight: 700, color: '#656989' }} />
               </PieChart>
             </ResponsiveContainer>
           )}
@@ -141,13 +155,15 @@ export default function Analytics({ user, onBack, canGoBack }) {
           ) : (
             <ResponsiveContainer width="100%" height={300}>
               <BarChart data={dailyRevenue}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="day" />
-                <YAxis />
-                <Tooltip 
+                <CartesianGrid stroke={GRID} strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="day" tick={TICK} tickLine={false} axisLine={{ stroke: GRID }} />
+                <YAxis tick={TICK} tickLine={false} axisLine={false} />
+                <Tooltip
+                  contentStyle={TOOLTIP_STYLE}
+                  cursor={{ fill: 'rgba(79, 209, 165, 0.1)' }}
                   formatter={(value) => [`$${value.toFixed(2)}`, 'Revenue']}
                 />
-                <Bar dataKey="revenue" fill="#2E6FE5" />
+                <Bar dataKey="revenue" fill="#4FD1A5" radius={[12, 12, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           )}

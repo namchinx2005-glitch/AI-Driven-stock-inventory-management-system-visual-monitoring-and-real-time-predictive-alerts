@@ -324,11 +324,21 @@ export default function App() {
             <h2>{selectedLabel ? `${selectedLabel} — daily units sold` : "Burn rate"}</h2>
             <ResponsiveContainer width="100%" height={220}>
               <LineChart data={burnSeries} margin={{ top: 4, right: 12, left: -18, bottom: 0 }}>
-                <CartesianGrid stroke="#D7D9CC" vertical={false} />
-                <XAxis dataKey="day" tick={{ fontSize: 11, fill: "#57604F" }} tickLine={false} axisLine={{ stroke: "#D7D9CC" }} />
-                <YAxis tick={{ fontSize: 11, fill: "#57604F" }} tickLine={false} axisLine={false} allowDecimals={false} />
-                <Tooltip contentStyle={{ fontSize: 12, border: "1px solid #D7D9CC" }} />
-                <Line type="monotone" dataKey="units_sold" stroke="#2F6D4F" strokeWidth={2} dot={{ r: 3 }} />
+                <CartesianGrid stroke="#D9DCF3" strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="day" tick={{ fontSize: 11, fill: "#656989", fontWeight: 600 }} tickLine={false} axisLine={{ stroke: "#D9DCF3" }} />
+                <YAxis tick={{ fontSize: 11, fill: "#656989", fontWeight: 600 }} tickLine={false} axisLine={false} allowDecimals={false} />
+                <Tooltip
+                  contentStyle={{
+                    background: "#F5F6FF",
+                    border: "none",
+                    borderRadius: 16,
+                    boxShadow: "6px 6px 16px rgba(122, 128, 184, 0.35), -4px -4px 12px rgba(255, 255, 255, 0.9)",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    color: "#2B2D4A",
+                  }}
+                />
+                <Line type="monotone" dataKey="units_sold" stroke="#6C5CE7" strokeWidth={4} strokeLinecap="round" dot={{ r: 5, fill: "#F5F6FF", stroke: "#6C5CE7", strokeWidth: 3 }} activeDot={{ r: 7 }} />
               </LineChart>
             </ResponsiveContainer>
 
