@@ -4,23 +4,33 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LedgerLens Inventory</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@400;600;700;800&display=swap">
   <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
 </head>
 <body data-poll-ms="{{ poll_seconds * 1000 }}" data-detection-ms="{{ detection_seconds * 1000 }}">
   <main id="login" class="login-card">
+    <span class="brand-icon" aria-hidden="true">L</span>
     <h1>LedgerLens</h1><p>Real-time inventory management</p>
     <form id="login-form"><label>Username<input name="username" required autocomplete="username"></label><label>Password<input name="password" type="password" required autocomplete="current-password"></label><button>Sign in</button></form>
     <p id="login-error" class="message error" hidden></p><small>Demo: manager / manager123</small>
   </main>
 
   <div id="app" class="app-shell" hidden>
-    <aside><h1>LedgerLens</h1><p class="muted">Inventory workspace</p>
+    <aside>
+      <div class="brand"><span class="brand-icon" aria-hidden="true">L</span><div><h1>LedgerLens</h1><p class="muted">Inventory workspace</p></div></div>
       <nav>
-        <button data-view="dashboard" class="active">Dashboard</button><button data-view="camera">Camera monitor</button><button data-view="inventory">Inventory</button><button data-view="pos">Point of sale</button><button data-view="analytics">Analytics</button><button data-view="users" data-manager-only>Users</button>
+        <button data-view="dashboard" class="active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="2"/><rect x="14" y="3" width="7" height="5" rx="2"/><rect x="14" y="12" width="7" height="9" rx="2"/><rect x="3" y="16" width="7" height="5" rx="2"/></svg>Dashboard</button>
+        <button data-view="camera"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Camera monitor</button>
+        <button data-view="inventory"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7l9-4 9 4v10l-9 4-9-4z"/><path d="M3 7l9 4 9-4M12 11v10"/></svg>Inventory</button>
+        <button data-view="pos"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M3 4h3l2.5 11h10L21 8H7"/></svg>Point of sale</button>
+        <button data-view="analytics"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 20V11M12 20V4M19 20v-6"/></svg>Analytics</button>
+        <button data-view="users" data-manager-only><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6"/><path d="M16 4.5a3.5 3.5 0 010 7M18 14.5c2.3.6 3.5 2.6 3.5 5.5"/></svg>Users</button>
       </nav>
       <div class="sidebar-bottom"><span id="current-user"></span><button id="logout" class="quiet">Sign out</button></div>
     </aside>
-    <section class="content"><header><div><h2 id="page-title">Dashboard</h2><p id="connection" class="muted">Updating every {{ poll_seconds }} seconds</p></div><div id="camera-chip" class="camera-chip">Camera off</div></header>
+    <section class="content"><header><div><h2 id="page-title">Dashboard</h2><p id="connection" class="muted">Updating every {{ poll_seconds }} seconds</p></div><div id="camera-chip" class="camera-chip off">Camera off</div></header>
       <div id="toast" class="toast" hidden></div>
 
       <section class="view active" id="dashboard-view">
