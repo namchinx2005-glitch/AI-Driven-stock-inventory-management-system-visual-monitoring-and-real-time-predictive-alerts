@@ -51,15 +51,14 @@ ALLOW_GENERIC_COCO_COUNTING = False
 # "salt_1kg": {"box": (40, 40, 400, 680), "label": "Salt 1kg",
 #              "model_labels": ["Salt 1kg", "salt_1kg"]}
 # Coordinates are in a 1280x720 frame (720p, matching Ch3 Table 3.1's camera spec).
-# These are placeholder boxes for a 3-lane shelf — walk through the calibration
-# steps in the README before your first real run to set these to your actual shelf.
-SHELF_REGIONS = {
-    "sugar_2kg":   {"box": (40, 40, 400, 680), "label": "Sugar 2kg"},
-    "salt_1kg":    {"box": (440, 40, 800, 680), "label": "Salt 1kg"},
-    "cooking_oil": {"box": (840, 40, 1200, 680), "label": "Cooking Oil 2L"},
-    "minute_maid_400ml": {'box': (862, 8, 1279, 249), 'label': 'Minute Maid 400ml'},
-    "rice 2kg": {"box": (0, 1, 1280, 720), 'label': "rice 2kg32"},
-}
+# Cleared: add one entry per product after running `python calibrate_regions.py`
+# against your real camera, then paste the printed box here.  Example:
+#
+#     "sugar_2kg": {"box": (x1, y1, x2, y2), "label": "Sugar 2kg"},
+#
+# Use the same product_id as the product record, and keep boxes from
+# overlapping.  While this is empty the camera worker has nothing to count.
+SHELF_REGIONS = {}
 
 # --- Forecasting ---
 BURN_RATE_WINDOW_DAYS = 7
