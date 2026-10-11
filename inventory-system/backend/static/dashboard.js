@@ -5,9 +5,19 @@
   const $ = (selector) => document.querySelector(selector);
   const pollMs = Number(document.body.dataset.pollMs || 5000);
   const detectionMs = Number(document.body.dataset.detectionMs || 2000);
+  const applyTheme = (theme) => {
+    const dark = theme === 'dark';
+    document.body.classList.toggle('theme-dark', dark);
+    $('#theme-toggle').setAttribute('aria-pressed', String(dark));
+    $('#theme-toggle').setAttribute('aria-label', `Switch to ${dark ? 'light' : 'dark'} theme`);
+    $('#theme-toggle-text').textContent = dark ? 'Light' : 'Dark';
+    $('#theme-toggle span:first-child').textContent = dark ? '☀' : '☾';
+    localStorage.setItem('ledgerlens-theme', dark ? 'dark' : 'light');
+  };
+  applyTheme(localStorage.getItem('ledgerlens-theme') || 'light');
   let token = localStorage.getItem('token');
   let user = JSON.parse(localStorage.getItem('user') || 'null');
-  let stock = [], products = [], cart = [], stream = null, scanBusy = false, lastAlertId = null;
+  let stock = [], products = [], cart = [], stream = null, scanBusy = false, lastAlertId = null, posCategory = 'All';
 
   const json = async (path, options = {}) => {
     const headers = {...(options.headers || {})};
@@ -31,7 +41,7 @@
   function setView(name) {
     document.querySelectorAll('.view').forEach(el => el.classList.toggle('active', el.id === `${name}-view`));
     document.querySelectorAll('[data-view]').forEach(el => el.classList.toggle('active', el.dataset.view === name));
-    $('#page-title').textContent = ({dashboard:'Dashboard',camera:'Camera monitor',inventory:'Inventory',pos:'Point of sale',analytics:'Analytics',users:'User management'})[name];
+    $('#page-title').textContent = ({dashboard:'Just-in-Time Control',camera:'Camera monitor',inventory:'Inventory',pos:'Point of sale',analytics:'Analytics',users:'User management'})[name];
     $('#persistent-camera').style.display = stream && name !== 'camera' ? 'block' : 'none';
     if (name === 'inventory') renderInventory();
     if (name === 'pos') renderPOS();
@@ -50,10 +60,18 @@
   }
   function renderDashboard(alerts, suggestions, review) {
     $('#stat-products').textContent = stock.length;
-    $('#stat-low').textContent = stock.filter(x => x.status !== 'HEALTHY').length;
+    const actionItems = stock.filter(x => x.status !== 'HEALTHY');
+    const cover = stock.map(x => Number(x.days_remaining)).filter(Number.isFinite).filter(x => x >= 0);
+    const averageCover = cover.length ? Math.round(cover.reduce((sum, x) => sum + x, 0) / cover.length) : null;
+    $('#stat-low').textContent = actionItems.length;
+    $('#stat-cover').textContent = averageCover === null ? '—' : `${averageCover}d`;
     $('#last-refresh').textContent = new Date().toLocaleTimeString();
+    $('#jit-queue-count').textContent = `${suggestions.length} queued`;
+    $('#jit-review-state').textContent = review.reviewed ? 'Complete' : 'Due now';
+    $('#jit-title').textContent = actionItems.length ? `${actionItems.length} item${actionItems.length === 1 ? '' : 's'} need a pull signal` : 'Inventory flow is on track';
+    $('#jit-status').textContent = actionItems.length ? `Replenish only what is needed: ${actionItems.map(x => x.label).join(', ')} need attention.` : 'Stock levels and demand forecasts are aligned with the current replenishment plan.';
     $('#stock-table').innerHTML = stock.map(x => `<tr><td>${escape(x.label)}</td><td>${x.current_stock}</td><td>${Number(x.burn_rate_per_day || 0).toFixed(1)}</td><td>${escape(x.depletion_date || '—')}</td><td class="status ${x.status}">${x.status}</td></tr>`).join('') || '<tr><td colspan="5">No inventory records.</td></tr>';
-    $('#suggestions').innerHTML = suggestions.map(x => { const seasonal = x.seasonal_validation || {}; const factor = seasonal.validated ? ` · seasonal factor ${Number(x.seasonal_multiplier).toFixed(2)} (validated)` : (seasonal.reason ? ` · ${escape(seasonal.reason)}` : ''); return `<div class="suggestion"><strong>${escape(x.label)}</strong><br><span class="muted">${escape(x.suggested_action)} · buy ${x.suggested_quantity ?? 0} · target ${x.target_stock ?? 0} · ${Number(x.daily_burn_rate || 0).toFixed(1)}/day${factor}</span><br><small class="muted">${escape(x.data_quality || '')}</small></div>`; }).join('') || 'No restock suggestions.';
+    $('#suggestions').innerHTML = suggestions.map(x => { const seasonal = x.seasonal_validation || {}; const factor = seasonal.validated ? ` · seasonal factor ${Number(x.seasonal_multiplier).toFixed(2)} (validated)` : (seasonal.reason ? ` · ${escape(seasonal.reason)}` : ''); const urgent = /immediately|out of stock/i.test(x.suggested_action || ''); return `<div class="suggestion jit-suggestion"><span class="jit-priority ${urgent ? 'urgent' : ''}">${urgent ? 'Act now' : 'Plan'}</span><strong>${escape(x.label)}</strong><br><span class="muted">${escape(x.suggested_action)} · order ${x.suggested_quantity ?? 0} · target ${x.target_stock ?? 0} · ${Number(x.daily_burn_rate || 0).toFixed(1)}/day${factor}</span><br><small class="muted">${escape(x.data_quality || '')}</small></div>`; }).join('') || '<p class="jit-clear">No replenishment actions are needed right now.</p>';
     const manager = ['manager', 'admin'].includes(user.role); const reviewText = review.reviewed ? `Reviewed for week of ${escape(review.review_week)}${review.review?.reviewed_at ? ` · ${new Date(review.review.reviewed_at).toLocaleString()}` : ''}` : `Weekly review due for week of ${escape(review.review_week)}.`; $('#restock-review').innerHTML = `<strong>${reviewText}</strong><br><span class="muted">Review reorder quantities weekly; record deliveries and POS sales daily before approving orders.</span>${manager && !review.reviewed ? '<br><button id="mark-restock-reviewed" class="quiet">Mark this week reviewed</button>' : ''}`; $('#mark-restock-reviewed')?.addEventListener('click', markRestockReviewed);
     $('#alerts').innerHTML = alerts.map(x => `<div class="alert-row"><strong>${x.level}</strong> — ${escape(x.message)}<br><small class="muted">${escape(x.timestamp)}</small></div>`).join('') || 'No recent alerts.';
     const critical = stock.filter(x => x.status === 'CRITICAL'); const banner = $('#alert-banner');
@@ -73,11 +91,15 @@
   }
   function renderPOS() {
     const query = ($('#pos-search').value || '').toLowerCase();
-    const matches = products.filter(p => `${p.name} ${p.product_id} ${p.sku || ''} ${p.barcode || ''}`.toLowerCase().includes(query));
-    $('#pos-products').innerHTML = matches.map(p => { const item = stock.find(s => s.product_id === p.product_id); const available = item?.current_stock ?? 0; return `<button class="product" data-product="${escape(p.product_id)}" ${available <= 0 ? 'disabled title="Out of stock"' : ''}><strong>${escape(p.name)}</strong><br><span>${escape(p.sku || p.product_id)} · ${money(p.price)}</span><br><small class="muted">${available > 0 ? `${available} in stock` : 'Out of stock'}</small></button>`; }).join('') || 'No matching items.';
+    const categories = ['All', ...new Set(products.map(p => p.category || 'Other'))];
+    if (!categories.includes(posCategory)) posCategory = 'All';
+    $('#pos-categories').innerHTML = categories.map(category => `<button class="pos-category ${category === posCategory ? 'active' : ''}" data-category="${escape(category)}"><span>${category === 'All' ? '▦' : '◌'}</span>${escape(category)}</button>`).join('');
+    $('#pos-categories').querySelectorAll('[data-category]').forEach(el => el.onclick = () => { posCategory = el.dataset.category; renderPOS(); });
+    const matches = products.filter(p => (posCategory === 'All' || (p.category || 'Other') === posCategory) && `${p.name} ${p.product_id} ${p.sku || ''} ${p.barcode || ''}`.toLowerCase().includes(query));
+    $('#pos-products').innerHTML = matches.map((p, index) => { const item = stock.find(s => s.product_id === p.product_id); const available = item?.current_stock ?? 0; const visual = ['◒','◈','◇','◉','◌','◐'][index % 6]; return `<button class="product pos-product" data-product="${escape(p.product_id)}" ${available <= 0 ? 'disabled title="Out of stock"' : ''}><span class="product-visual visual-${index % 6}">${visual}</span><span class="product-meta"><strong>${escape(p.name)}</strong><small>${escape(p.category || 'Inventory')}</small></span><span class="product-price">${money(p.price)}</span><small class="product-stock">${available > 0 ? `${available} available` : 'Out of stock'}</small></button>`; }).join('') || '<p class="pos-empty">No products match this search.</p>';
     $('#pos-products').querySelectorAll('[data-product]').forEach(el => el.onclick = () => addCart(products.find(p => p.product_id === el.dataset.product)));
-    $('#cart').innerHTML = cart.length ? cart.map(item => `<div class="cart-row"><span>${escape(item.name)} × ${item.quantity}</span><span>${money(item.price * item.quantity)} <button data-minus="${escape(item.product_id)}">−</button><button data-plus="${escape(item.product_id)}">+</button></span></div>`).join('') : 'Your cart is empty.';
-    $('#cart-total').textContent = money(cart.reduce((sum, x) => sum + x.price * x.quantity, 0));
+    $('#cart').innerHTML = cart.length ? cart.map(item => `<div class="cart-row"><span class="cart-item-dot">${escape(item.name).slice(0,1)}</span><span class="cart-item-name">${escape(item.name)}<small>${money(item.price)} each</small></span><span class="cart-quantity"><button data-minus="${escape(item.product_id)}">−</button><b>${item.quantity}</b><button data-plus="${escape(item.product_id)}">+</button></span><strong>${money(item.price * item.quantity)}</strong></div>`).join('') : '<div class="cart-empty"><span>+</span><p>Your order is empty</p><small>Select products from the menu to start a sale.</small></div>';
+    const total = cart.reduce((sum, x) => sum + x.price * x.quantity, 0); $('#cart-total').textContent = money(total); $('#cart-subtotal').textContent = money(total); $('#pos-item-count').textContent = `${cart.reduce((sum, x) => sum + x.quantity, 0)} items`;
     $('#cart').querySelectorAll('[data-plus]').forEach(el => el.onclick = () => changeCart(el.dataset.plus, 1));
     $('#cart').querySelectorAll('[data-minus]').forEach(el => el.onclick = () => changeCart(el.dataset.minus, -1));
   }
@@ -123,10 +145,9 @@
 
   $('#login-form').onsubmit = async event => { event.preventDefault(); const form=new FormData(event.target); try { const result=await json('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:form.get('username'),password:form.get('password')})}); token=result.token;user=result.user;localStorage.setItem('token',token);localStorage.setItem('user',JSON.stringify(user));showApp(); } catch(err) { const el=$('#login-error');el.textContent=err.message;el.hidden=false; } };
   $('#logout').onclick=()=>{if(stream) toggleCamera();localStorage.removeItem('token');localStorage.removeItem('user');token=null;user=null;$('#app').hidden=true;$('#login').hidden=false;};
+  $('#theme-toggle').onclick=()=>applyTheme(document.body.classList.contains('theme-dark') ? 'light' : 'dark');
   document.querySelectorAll('[data-view]').forEach(el=>el.onclick=()=>setView(el.dataset.view)); $('#camera-toggle').onclick=toggleCamera; $('#inventory-search').oninput=renderInventory; $('#inventory-refresh').onclick=()=>{loadProducts();refresh();}; $('#pos-search').oninput=renderPOS; $('#checkout').onclick=checkout; $('#print-receipt').onclick=printReceipt; $('#analytics-product').onchange=renderAnalytics; $('#analytics-run').onclick=renderAnalytics;
   $('#receive-form').onsubmit=async event=>{event.preventDefault();try{const result=await json('/api/inventory/receive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({product_id:$('#receive-product').value,quantity:Number($('#receive-quantity').value),note:$('#receive-note').value,source:'manual'})});message(`Stock received. On hand: ${result.current_stock}`);event.target.reset();refresh();}catch(err){message(err.message);}};
   $('#new-user-form').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.target);try{const result=await json('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(form))});message(result.message);event.target.reset();renderUsers();}catch(err){message(err.message);}};
   setInterval(refresh,pollMs); setInterval(scan,detectionMs); if(token && user) showApp();
 })();
-
-
