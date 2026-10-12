@@ -17,7 +17,7 @@ DETECTION_MODEL_NAME = "YOLO26n / custom shelf dataset"
 # Put the fine-tuned `yolo26n.pt` in backend/ before enabling camera inference.
 # COCO weights alone cannot identify salt or other branded groceries; train the
 # model using your labelled shelf-product dataset before production use.
-YOLO_MODEL_PATH = os.path.join(os.path.dirname(__file__), "yolo26n.pt")
+YOLO_MODEL_PATH = "runs/detect/train-3/weights/best.pt"
 COCO_CLASSES_PATH = "coco_classes.txt"  # COCO dataset classes file
 
 # --- Timing ---
@@ -54,7 +54,7 @@ ALLOW_GENERIC_COCO_COUNTING = False
 # These are placeholder boxes for a 3-lane shelf — walk through the calibration
 # steps in the README before your first real run to set these to your actual shelf.
 SHELF_REGIONS = {
-    "sugar_2kg":   {"box": (40, 40, 400, 680), "label": "Sugar 2kg"},
+    "peanut_butter_375ml":   {"box": (1, 2, 219, 303), "label": "Peanut Butter/Dovi 375ml"},
     "salt_1kg":    {"box": (440, 40, 800, 680), "label": "Salt 1kg"},
     "cooking_oil": {"box": (840, 40, 1200, 680), "label": "Cooking Oil 2L"},
     "minute_maid_400ml": {'box': (862, 8, 1279, 249), 'label': 'Minute Maid 400ml'},
