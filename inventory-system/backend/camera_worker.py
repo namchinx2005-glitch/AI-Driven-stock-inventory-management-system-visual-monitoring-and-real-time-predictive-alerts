@@ -20,6 +20,17 @@ def point_in_region(cx, cy, region):
     return x1 <= cx <= x2 and y1 <= cy <= y2
 
 
+def normalize_label(label):
+    """Treat 'Peanut Butter', 'peanut-butter' and 'peanut_butter' as one class."""
+    return "_".join(str(label).strip().lower().replace("-", " ").replace("_", " ").split())
+
+
+def label_matches(label, expected):
+    """True when a model class name equals any expected label, ignoring case,
+    spaces, hyphens and underscores (Roboflow class names vary in style)."""
+    return normalize_label(label) in {normalize_label(item) for item in expected}
+
+
 def count_detections_per_region(results, frame_shape=None):
     """Filter YOLO boxes, then count each accepted centroid in one shelf region."""
     counts = {pid: 0 for pid in config.SHELF_REGIONS}
@@ -43,8 +54,8 @@ def count_detections_per_region(results, frame_shape=None):
                 # Fine-tuned models should list the product ID (or an explicit
                 # model_labels value) as the class. COCO labels remain a
                 # backwards-compatible fallback for the prototype regions.
-                expected = set(region.get("model_labels", [product_id]))
-                if label in expected or (config.ALLOW_GENERIC_COCO_COUNTING and label in config.COUNTABLE_COCO_CLASSES):
+                expected = region.get("model_labels", [product_id])
+                if label_matches(label, expected) or (config.ALLOW_GENERIC_COCO_COUNTING and label in config.COUNTABLE_COCO_CLASSES):
                     counts[product_id] += 1
                 break
     return counts
@@ -82,9 +93,9 @@ def unknown_detections_per_region(results):
         for product_id, region in config.SHELF_REGIONS.items():
             if not point_in_region(cx, cy, region):
                 continue
-            expected = set(region.get("model_labels", [product_id]))
+            expected = region.get("model_labels", [product_id])
             is_legacy_coco_label = label in config.COUNTABLE_COCO_CLASSES
-            if label not in expected and not (config.ALLOW_GENERIC_COCO_COUNTING and is_legacy_coco_label):
+            if not label_matches(label, expected) and not (config.ALLOW_GENERIC_COCO_COUNTING and is_legacy_coco_label):
                 unknown.append({"label": label, "product_id": product_id, "confidence": confidence})
             break
     return unknown
@@ -232,7 +243,15 @@ def calibrate_region(product_id, label=None, camera_index=None):
         x, y, width, height = cv2.selectROI("Draw shelf region then press Enter", frame, showCrosshair=True)
         if width <= 0 or height <= 0:
             return None
-        box = (int(x), int(y), int(x + width), int(y + height))
+        # Counting scales every detection to a 1280x720 frame, so the saved box
+        # must be in that same space even if the webcam returned another size
+        # (many laptop cameras fall back to 640x480).
+        frame_height, frame_width = frame.shape[:2]
+        scale_x, scale_y = 1280 / frame_width, 720 / frame_height
+        if (frame_width, frame_height) != (1280, 720):
+            log.warning("Camera returned %dx%d, not 1280x720; scaling the box to 1280x720.", frame_width, frame_height)
+        box = (round(x * scale_x), round(y * scale_y),
+               round((x + width) * scale_x), round((y + height) * scale_y))
         config.SHELF_REGIONS[product_id] = {"box": box, "label": label or product_id}
         return box
     finally:
