@@ -107,11 +107,14 @@
   const changeCart = (id, delta) => { cart = cart.map(x => x.product_id === id ? {...x, quantity:x.quantity + delta} : x).filter(x => x.quantity > 0); renderPOS(); };
   async function checkout() {
     if (!cart.length) return message('Add a product to the cart first.');
-    try { const total = cart.reduce((sum,x) => sum+x.price*x.quantity,0); const result = await json('/api/pos/transaction', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:cart.map(x=>({product_id:x.product_id,quantity:x.quantity,unit_price:x.price})),total_amount:total,payment_method:'cash'})}); cart=[]; renderPOS(); renderReceipt(result.receipt, result.transaction_id); message(`Sale completed: ${result.transaction_id}`); refresh(); } catch (err) { message(err.message); }
+    const paymentMethod = document.querySelector('input[name="payment-method"]:checked')?.value;
+    if (!paymentMethod) return message('Choose Cash, EcoCash, or Debit card before completing the sale.');
+    try { const total = cart.reduce((sum,x) => sum+x.price*x.quantity,0); const result = await json('/api/pos/transaction', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:cart.map(x=>({product_id:x.product_id,quantity:x.quantity,unit_price:x.price})),total_amount:total,payment_method:paymentMethod})}); cart=[]; document.querySelectorAll('input[name="payment-method"]').forEach(input => input.checked = false); renderPOS(); renderReceipt(result.receipt, result.transaction_id); message(`Sale completed: ${result.transaction_id}`); refresh(); } catch (err) { message(err.message); }
   }
   function renderReceipt(receipt, id) {
     const safeItems = (receipt.items || []).map(item => `<div class="receipt-line"><span>${escape(item.product_name)} × ${item.quantity}</span><span>${money(item.total_price)}</span></div>`).join('');
-    $('#receipt-content').innerHTML = `<p>Receipt #${escape(id)}<br>${escape(receipt.cashier)}<br>${new Date(receipt.timestamp).toLocaleString()}</p>${safeItems}<hr><div class="receipt-line"><strong>Total</strong><strong>${money(receipt.total_amount)}</strong></div><p class="muted">Payment: ${escape(receipt.payment_method)}</p>`;
+    const paymentLabel = {cash:'Cash', ecocash:'EcoCash', debit_card:'Debit card'}[receipt.payment_method] || receipt.payment_method;
+    $('#receipt-content').innerHTML = `<p>Receipt #${escape(id)}<br>${escape(receipt.cashier)}<br>${new Date(receipt.timestamp).toLocaleString()}</p>${safeItems}<hr><div class="receipt-line"><strong>Total</strong><strong>${money(receipt.total_amount)}</strong></div><p class="muted">Payment: ${escape(paymentLabel)}</p>`;
     $('#receipt').hidden = false;
   }
   function printReceipt() {

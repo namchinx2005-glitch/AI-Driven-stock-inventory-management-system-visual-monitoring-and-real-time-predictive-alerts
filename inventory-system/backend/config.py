@@ -1,7 +1,7 @@
 """
 Central configuration for the inventory system.
 
-Model: fine-tuned YOLO26 Nano shelf-product model.
+Model: fine-tuned custom shelf-product detector.
 Interval: 2 seconds, per Ch1 §1.5 Objective 1.
 """
 
@@ -13,19 +13,16 @@ from dotenv import load_dotenv
 # automatically for local development.
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), override=False)
 
-DETECTION_MODEL_NAME = "YOLO26n / custom shelf dataset"
-# Put the fine-tuned `yolo26n.pt` in backend/ before enabling camera inference.
-# COCO weights alone cannot identify salt or other branded groceries; train the
-# model using your labelled shelf-product dataset before production use.
-YOLO_MODEL_PATH = "runs/detect/train-3/weights/best.pt"
-COCO_CLASSES_PATH = "coco_classes.txt"  # COCO dataset classes file
+DETECTION_MODEL_NAME = "Custom shelf-product detector"
+# Run the backend from this directory (``python app.py``), so this is the
+# requested relative path to the downloaded custom weights.
+YOLO_MODEL_PATH = "best.pt"
 
 # --- Timing ---
 DETECTION_INTERVAL_SECONDS = 2      # camera capture / detection cycle interval (Objective 1)
 DETECTION_INTERVAL = DETECTION_INTERVAL_SECONDS  # worker-specification alias
 # A count must be seen in this many consecutive frames before it is treated as
-# a real shelf change. This prevents a person or an occluded item causing a
-# stock adjustment.
+# a real shelf change. This prevents an occluded item causing a stock adjustment.
 STABLE_COUNT_CYCLES = 3
 UNKNOWN_ITEM_ALERT_COOLDOWN_SECONDS = 300
 DASHBOARD_POLL_SECONDS = 5          # frontend polling interval
@@ -33,32 +30,14 @@ SMS_DISPATCH_BUDGET_SECONDS = 10    # target ceiling for Objective 4
 
 # --- Detection ---
 CONFIDENCE_THRESHOLD = 0.35
-# Expanded COCO classes relevant for retail inventory
-COUNTABLE_COCO_CLASSES = {
-    "bottle", "cup", "wine glass", "cup", "fork", "knife", "spoon", "bowl", 
-    "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", 
-    "pizza", "donut", "cake", "book", "cell phone", "box", "backpack", "handbag", 
-    "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite", 
-    "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket"
-}
-# Automatic stock movements should normally use a fine-tuned model whose class
-# labels match a region's product ID/model_labels. Leave this false so a COCO
-# class such as "bottle" is never mistaken for a specific SKU.
-ALLOW_GENERIC_COCO_COUNTING = False
-
 # --- Shelf regions: pixel-space rectangles mapped to product IDs ---
-# Add ``model_labels`` when the training label differs from product_id, e.g.:
-# "salt_1kg": {"box": (40, 40, 400, 680), "label": "Salt 1kg",
-#              "model_labels": ["Salt 1kg", "salt_1kg"]}
 # Coordinates are in a 1280x720 frame (720p, matching Ch3 Table 3.1's camera spec).
 # These are placeholder boxes for a 3-lane shelf — walk through the calibration
 # steps in the README before your first real run to set these to your actual shelf.
 SHELF_REGIONS = {
-    "peanut_butter_375ml":   {"box": (1, 2, 219, 303), "label": "Peanut Butter/Dovi 375ml"},
-    "salt_1kg":    {"box": (440, 40, 800, 680), "label": "Salt 1kg"},
-    "cooking_oil": {"box": (840, 40, 1200, 680), "label": "Cooking Oil 2L"},
-    "minute_maid_400ml": {'box': (862, 8, 1279, 249), 'label': 'Minute Maid 400ml'},
-    "rice 2kg": {"box": (0, 1, 1280, 720), 'label': "rice 2kg32"},
+    "Gloria_biscuits": (0, 0, 426, 720),
+    "Gunanzi_snack":   (427, 0, 853, 720),
+    "Mirinda_apple":   (854, 0, 1280, 720),
 }
 
 # --- Forecasting ---
@@ -111,7 +90,7 @@ ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "namchinx2005@gmail.com")
 JWT_SECRET = os.getenv("JWT_SECRET", "development-only-change-this-secret")
 JWT_EXPIRATION_HOURS = int(os.getenv("JWT_EXPIRATION_HOURS", "24"))
 
-# --- Detection source: "simulated" (no camera needed) or "camera" (real webcam + YOLO26) ---
+# --- Detection source: "simulated" (no camera needed) or "camera" (real webcam + YOLO) ---
 DETECTION_SOURCE = "camera"
 CAMERA_INDEX = 0
 CAMERA_FALLBACK_INDICES = [0, 1, 2]

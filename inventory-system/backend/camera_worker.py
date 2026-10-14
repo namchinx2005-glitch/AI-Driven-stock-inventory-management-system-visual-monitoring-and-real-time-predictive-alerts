@@ -20,6 +20,11 @@ def point_in_region(cx, cy, region):
     return x1 <= cx <= x2 and y1 <= cy <= y2
 
 
+def label_matches_region(label, product_id, region):
+    """Return whether a detection has the exact class for this shelf region."""
+    return label == product_id
+
+
 def count_detections_per_region(results, frame_shape=None):
     """Filter YOLO boxes, then count each accepted centroid in one shelf region."""
     counts = {pid: 0 for pid in config.SHELF_REGIONS}
@@ -29,6 +34,9 @@ def count_detections_per_region(results, frame_shape=None):
         if conf < config.CONFIDENCE_THRESHOLD:
             continue
         label = _name_for(results, cls_id)
+        if label not in config.SHELF_REGIONS:
+            log.warning("Skipping unsupported model class %r", label)
+            continue
         coords = box.xyxy[0]
         x1, y1, x2, y2 = coords.tolist() if hasattr(coords, "tolist") else coords
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
@@ -40,12 +48,10 @@ def count_detections_per_region(results, frame_shape=None):
                 cx, cy = cx * 1280 / width, cy * 720 / height
         for product_id, region in config.SHELF_REGIONS.items():
             if point_in_region(cx, cy, region):
-                # Fine-tuned models should list the product ID (or an explicit
-                # model_labels value) as the class. COCO labels remain a
-                # backwards-compatible fallback for the prototype regions.
-                expected = set(region.get("model_labels", [product_id]))
-                if label in expected or (config.ALLOW_GENERIC_COCO_COUNTING and label in config.COUNTABLE_COCO_CLASSES):
+                if label_matches_region(label, product_id, region):
                     counts[product_id] += 1
+                else:
+                    log.warning("Skipping unsupported class %r in %s region", label, product_id)
                 break
     return counts
 
@@ -59,10 +65,8 @@ def _name_for(results, class_id):
 def unknown_detections_per_region(results):
     """Return high-confidence labels in shelf regions that cannot be counted.
 
-    A custom shelf model should use product IDs as its class labels (for
-    example ``salt_1kg``). The legacy COCO allow-list remains supported for
-    calibrated regions, but any other detected label on a shelf is surfaced to
-    an operator instead of changing inventory.
+    Detections whose exact model label does not match their shelf region are
+    surfaced to an operator instead of changing inventory.
     """
     unknown = []
     for box in results.boxes:
@@ -71,6 +75,9 @@ def unknown_detections_per_region(results):
         if confidence < config.CONFIDENCE_THRESHOLD:
             continue
         label = _name_for(results, class_id)
+        if label not in config.SHELF_REGIONS:
+            log.warning("Skipping unsupported model class %r", label)
+            continue
         coords = box.xyxy[0]
         x1, y1, x2, y2 = coords.tolist() if hasattr(coords, "tolist") else coords
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
@@ -82,9 +89,7 @@ def unknown_detections_per_region(results):
         for product_id, region in config.SHELF_REGIONS.items():
             if not point_in_region(cx, cy, region):
                 continue
-            expected = set(region.get("model_labels", [product_id]))
-            is_legacy_coco_label = label in config.COUNTABLE_COCO_CLASSES
-            if label not in expected and not (config.ALLOW_GENERIC_COCO_COUNTING and is_legacy_coco_label):
+            if not label_matches_region(label, product_id, region):
                 unknown.append({"label": label, "product_id": product_id, "confidence": confidence})
             break
     return unknown
@@ -165,8 +170,8 @@ class CameraDetector:
 
         self.cv2 = cv2
         if not os.path.exists(config.YOLO_MODEL_PATH):
-            raise RuntimeError(f"YOLO model not found: {config.YOLO_MODEL_PATH}. Add your fine-tuned yolo26n.pt before starting the worker.")
-        self.model = YOLO(config.YOLO_MODEL_PATH)
+            raise RuntimeError(f"YOLO model not found: {config.YOLO_MODEL_PATH}.")
+        self.model = YOLO("best.pt")
         self.cap = None
 
     def _open_camera(self):
@@ -197,7 +202,10 @@ class CameraDetector:
             return None
         try:
             # Inference -> filter -> region match; frame remains in memory only.
-            results = self.model(frame, verbose=False)[0]
+            # Pass the configured threshold to YOLO itself.  Otherwise
+            # Ultralytics' default (0.25) silently discards candidates before
+            # our own threshold check can inspect them.
+            results = self.model(frame, conf=config.CONFIDENCE_THRESHOLD, verbose=False)[0]
             return count_detections_per_region(results, frame.shape), unknown_detections_per_region(results)
         except Exception as exc:
             log.exception("YOLO inference failed: %s", exc)

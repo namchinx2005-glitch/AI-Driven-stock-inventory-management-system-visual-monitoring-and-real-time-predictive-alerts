@@ -190,8 +190,7 @@ def api_forecast_comparison(product_id):
 def api_health():
     return jsonify({"status": "ok", "detection_source": config.DETECTION_SOURCE,
                     "model": config.DETECTION_MODEL_NAME,
-                    "model_ready": os.path.exists(config.YOLO_MODEL_PATH),
-                    "salt_supported_by_coco": False})
+                    "model_ready": os.path.exists(config.YOLO_MODEL_PATH)})
 
 
 # Authentication endpoints
@@ -373,17 +372,21 @@ def api_pos_transaction():
     """Create a POS transaction."""
     if request.user.get('role') not in ('admin', 'manager', 'sales', 'sales_person'):
         return jsonify({"error": "This role cannot process sales"}), 403
-    data = request.get_json()
+    data = request.get_json() or {}
     required_fields = ['items', 'total_amount']
     if not all(field in data for field in required_fields):
         return jsonify({"error": "Missing required fields"}), 400
-    
+
+    payment_method = data.get('payment_method')
+    if payment_method not in {'cash', 'ecocash', 'debit_card'}:
+        return jsonify({"error": "Choose a payment method: cash, EcoCash, or debit card"}), 400
+
     try:
         transaction_id = database.create_pos_transaction(
             user_id=request.user['user_id'],
             items=data['items'],
             total_amount=float(data['total_amount']),
-            payment_method=data.get('payment_method', 'cash')
+            payment_method=payment_method
         )
         evaluate_alerts({item['product_id']: database.get_latest_count(item['product_id']) or 0 for item in data['items']})
         receipt_items = database.get_transaction_items(transaction_id)
@@ -392,7 +395,7 @@ def api_pos_transaction():
                         "receipt": {"system_name": "LedgerLens Inventory", "cashier": request.user.get('full_name', request.user['username']),
                                     "timestamp": __import__('datetime').datetime.utcnow().isoformat(),
                                     "items": receipt_items, "total_amount": receipt_total,
-                                    "payment_method": data.get('payment_method', 'cash')}}), 201
+                                    "payment_method": payment_method}}), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -467,7 +470,7 @@ def api_camera_scan():
     except (ValueError, binascii.Error):
         return jsonify({"error": "The webcam frame was empty or invalid. Wait for the camera preview, then try again."}), 400
     if not os.path.exists(config.YOLO_MODEL_PATH):
-        return jsonify({"error": "yolo26n.pt is not installed on the server. Camera receipt is available once the model file is added.",
+        return jsonify({"error": f"Trained YOLO model was not found at {config.YOLO_MODEL_PATH}.",
                         "detections": [], "model_ready": False,
                         "salt_supported": False}), 503
     try:
@@ -477,7 +480,10 @@ def api_camera_scan():
         frame = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
         if frame is None or frame.size == 0:
             return jsonify({"error": "The webcam frame could not be decoded. Wait for the camera preview, then try again."}), 400
-        result = YOLO(config.YOLO_MODEL_PATH)(frame, verbose=False)[0]
+        # Keep model inference and application filtering aligned. In
+        # particular, a temporary threshold below YOLO's 0.25 default must be
+        # honoured while diagnosing a weak custom model.
+        result = YOLO(config.YOLO_MODEL_PATH)(frame, conf=config.CONFIDENCE_THRESHOLD, verbose=False)[0]
         names = result.names
         detections = []
         for box in result.boxes:
@@ -491,17 +497,20 @@ def api_camera_scan():
         updates = _browser_shelf_reconciler.reconcile(counts)
         unknown = unknown_detections_per_region(result)
         _browser_shelf_reconciler.report_unknown(unknown)
-        model_labels = {str(value).lower() for value in (names.values() if hasattr(names, 'values') else names)}
+        trained_classes = [str(value) for value in (names.values() if hasattr(names, 'values') else names)]
+        model_labels = {value.lower() for value in trained_classes}
         salt_supported = "salt" in model_labels
-        notice = (f"{len(detections)} objects detected. Salt is available in this fine-tuned model."
-                  if salt_supported else f"{len(detections)} objects detected. This model has no salt class; confirm Salt manually until custom training is added.")
+        notice = (f"{len(detections)} object(s) detected by the trained model. "
+                  f"Trained class(es): {', '.join(trained_classes) or 'none'}.")
         if updates:
             update_text = ", ".join(f"{product_id}: {count}" for product_id, count in updates.items())
             notice = f"{notice} Inventory updated — {update_text}."
         elif unknown:
             notice = f"{notice} Unmapped item detected; inventory was not changed."
         return jsonify({"detections": detections, "model_ready": True, "salt_supported": salt_supported,
-                        "inventory_updates": updates, "unknown_items": unknown, "notice": notice})
+                        "inventory_updates": updates, "observed_counts": counts,
+                        "shelf_regions": config.SHELF_REGIONS,
+                        "unknown_items": unknown, "notice": notice})
     except Exception as exc:
         log.exception("Camera scan failed")
         return jsonify({"error": f"Scan failed: {exc}"}), 500
