@@ -72,6 +72,7 @@ def init_db():
                 sku TEXT,
                 barcode TEXT,
                 image_url TEXT,
+                camera_label TEXT UNIQUE,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
@@ -178,6 +179,10 @@ def init_db():
             conn.execute("ALTER TABLE sales_events ADD COLUMN sale_type TEXT NOT NULL DEFAULT 'auto'")
         if "user_id" not in sales_columns:
             conn.execute("ALTER TABLE sales_events ADD COLUMN user_id INTEGER")
+
+        product_columns = {row[1] for row in conn.execute("PRAGMA table_info(products)")}
+        if "camera_label" not in product_columns:
+            conn.execute("ALTER TABLE products ADD COLUMN camera_label TEXT")
 
         # Migrate the initial two-role table so existing installations can add
         # admins and accountants too.
@@ -405,15 +410,16 @@ def delete_user(user_id: int):
 
 # Product Management Functions
 def create_product(product_id: str, name: str, description: str = None, price: float = 0.0, 
-                   category: str = None, sku: str = None, barcode: str = None, image_url: str = None):
+                   category: str = None, sku: str = None, barcode: str = None, image_url: str = None,
+                   camera_label: str = None):
     category = normalize_category(category, name)
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO products (product_id, name, description, price, category, sku, barcode, image_url)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO products (product_id, name, description, price, category, sku, barcode, image_url, camera_label)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (product_id, name, description, price, category, sku, barcode, image_url),
+            (product_id, name, description, price, category, sku, barcode, image_url, camera_label),
         )
 
 
@@ -438,7 +444,7 @@ def update_product(product_id: str, **kwargs):
             return False
         kwargs["category"] = normalize_category(kwargs.get("category", existing["category"]),
                                                  kwargs.get("name", existing["name"]))
-    allowed_fields = ['name', 'description', 'price', 'category', 'sku', 'barcode', 'image_url']
+    allowed_fields = ['name', 'description', 'price', 'category', 'sku', 'barcode', 'image_url', 'camera_label']
     updates = [f"{k} = ?" for k in kwargs.keys() if k in allowed_fields]
     if not updates:
         return False
@@ -526,6 +532,18 @@ def create_pos_transaction(user_id: int, items: list, total_amount: float, payme
                          (product_id, new_count, datetime.utcnow().isoformat()))
     
     return transaction_id
+
+
+def get_pos_receipt_number(transaction_id: str):
+    """Return the sequential numeric receipt number for a POS transaction."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM pos_transactions WHERE transaction_id = ?",
+            (transaction_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError("Transaction not found")
+        return row["id"]
 
 
 def get_sales_trend(product_id: str, recent_days: int = 7):

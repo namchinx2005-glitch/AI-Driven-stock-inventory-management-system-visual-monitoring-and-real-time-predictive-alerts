@@ -1,6 +1,4 @@
 """
-Central configuration for the inventory system.
-
 Model: fine-tuned custom shelf-product detector.
 Interval: 2 seconds, per Ch1 §1.5 Objective 1.
 """
@@ -13,10 +11,12 @@ from dotenv import load_dotenv
 # automatically for local development.
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), override=False)
 
-DETECTION_MODEL_NAME = "Custom shelf-product detector"
-# Run the backend from this directory (``python app.py``), so this is the
-# requested relative path to the downloaded custom weights.
-YOLO_MODEL_PATH = "best.pt"
+DETECTION_MODEL_NAME = "Custom shelf-product detector + COCO fruits"
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+CUSTOM_MODEL_PATH = os.getenv("CUSTOM_MODEL_PATH", os.path.join(BACKEND_DIR, "best.pt"))
+COCO_MODEL_PATH = os.getenv("COCO_MODEL_PATH", os.path.join(BACKEND_DIR, "yolo26n.pt"))
+# Compatibility alias for integrations that still use the old setting.
+YOLO_MODEL_PATH = CUSTOM_MODEL_PATH
 
 # --- Timing ---
 DETECTION_INTERVAL_SECONDS = 2      # camera capture / detection cycle interval (Objective 1)
@@ -29,15 +29,41 @@ DASHBOARD_POLL_SECONDS = 5          # frontend polling interval
 SMS_DISPATCH_BUDGET_SECONDS = 10    # target ceiling for Objective 4
 
 # --- Detection ---
-CONFIDENCE_THRESHOLD = 0.35
+CUSTOM_CONFIDENCE_THRESHOLD = 0.35
+COCO_CONFIDENCE_THRESHOLD = 0.40
+CONFIDENCE_THRESHOLD = CUSTOM_CONFIDENCE_THRESHOLD
+CUSTOM_MODEL_CLASSES = ("Gloria_biscuits", "Gunanzi_snack", "Mirinda_apple")
+COCO_ALLOWED_CLASSES = {"apple", "banana", "orange"}
+ALLOW_GENERIC_COCO_COUNTING = False
 # --- Shelf regions: pixel-space rectangles mapped to product IDs ---
 # Coordinates are in a 1280x720 frame (720p, matching Ch3 Table 3.1's camera spec).
-# These are placeholder boxes for a 3-lane shelf — walk through the calibration
-# steps in the README before your first real run to set these to your actual shelf.
+# Draw actual shelf boxes with calibrate_regions.py. Region keys are product IDs;
+# model_labels maps a product to one or more unchanged model class names.
 SHELF_REGIONS = {
-    "Gloria_biscuits": (0, 0, 426, 720),
-    "Gunanzi_snack":   (427, 0, 853, 720),
-    "Mirinda_apple":   (854, 0, 1280, 720),
+	"gloria-biscuits": {
+		"box": (66, 2, 569, 224),
+		"model_labels": ["gloria_biscuits"],
+	},
+	"gunanzi-snacks": {
+		"box": (106, 233, 546, 474),
+		"model_labels": ["gunanzi_snack"],
+	},
+	"mirinda-apple": {
+		"box": (78, 496, 558, 720),
+		"model_labels": ["mirinda_apple"],
+	},
+	"apple": {
+		"box": (587, 24, 1034, 258),
+		"model_labels": ["apple"],
+	},
+	"banana": {
+		"box": (580, 264, 910, 476),
+		"model_labels": ["banana"],
+	},
+	"orange": {
+		"box": (593, 493, 1002, 713),
+		"model_labels": ["orange"],
+	},
 }
 
 # --- Forecasting ---

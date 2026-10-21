@@ -4,95 +4,156 @@ Frames are held in RAM for a single detection cycle only. This module never
 writes camera images or video to disk; it persists only inventory records.
 """
 import logging
-import os
 import threading
 from datetime import datetime, timedelta
 
 import config
 import database
+from detector import get_detector, normalize_label
 
 log = logging.getLogger("camera_worker")
 
 
 def point_in_region(cx, cy, region):
-    """Support configured {box: (...)} regions and raw rectangle regions."""
+    """Test a 1280x720-space point against a region definition."""
     x1, y1, x2, y2 = region.get("box", region) if isinstance(region, dict) else region
     return x1 <= cx <= x2 and y1 <= cy <= y2
 
 
+def label_matches(label, expected):
+    """Compare model labels while ignoring case, spaces, hyphens and underscores."""
+    return normalize_label(label) == normalize_label(expected)
+
+
+def _region_model_labels(product_id, region, product=None):
+    if isinstance(region, dict):
+        labels = region.get("model_labels")
+        if labels is None:
+            labels = region.get("label")
+        if labels is not None:
+            return [str(label) for label in (labels if isinstance(labels, (list, tuple, set)) else [labels])]
+    if product and product.get("camera_label"):
+        return [str(product["camera_label"])]
+    return [str(product_id)]
+
+
 def label_matches_region(label, product_id, region):
-    """Return whether a detection has the exact class for this shelf region."""
-    return label == product_id
+    """Return whether a model label maps to the given product's shelf region."""
+    return any(label_matches(label, expected) for expected in _region_model_labels(product_id, region))
 
 
-def count_detections_per_region(results, frame_shape=None):
-    """Filter YOLO boxes, then count each accepted centroid in one shelf region."""
-    counts = {pid: 0 for pid in config.SHELF_REGIONS}
-    for box in results.boxes:
-        cls_id = int(box.cls[0])
-        conf = float(box.conf[0])
-        if conf < config.CONFIDENCE_THRESHOLD:
+def _registered_shelf_regions():
+    """Map configured product-ID regions to products currently in inventory."""
+    registered = {}
+    products = {product["product_id"]: product for product in database.get_all_products()}
+    for product_id, definition in config.SHELF_REGIONS.items():
+        product = products.get(product_id)
+        if not product:
             continue
-        label = _name_for(results, cls_id)
-        if label not in config.SHELF_REGIONS:
-            log.warning("Skipping unsupported model class %r", label)
+        box = definition.get("box", definition) if isinstance(definition, dict) else definition
+        registered[product_id] = {"box": box,
+                                  "model_labels": _region_model_labels(product_id, definition, product)}
+    return registered
+
+
+def registered_camera_labels():
+    """Return model labels mapped to configured regions and catalog products."""
+    return {label for region in _registered_shelf_regions().values() for label in region["model_labels"]}
+
+
+def warn_region_configuration(custom_classes=None):
+    """Warn about unregistered configured regions and custom classes without zones."""
+    products = {item["product_id"] for item in database.get_all_products()}
+    for product_id in config.SHELF_REGIONS:
+        if product_id not in products:
+            log.warning("Shelf region %s has no matching product_id in the database", product_id)
+    classes = custom_classes or config.CUSTOM_MODEL_CLASSES
+    mapped = {normalize_label(label) for region in config.SHELF_REGIONS.values()
+              for label in _region_model_labels("", region)}
+    for class_name in classes:
+        if normalize_label(class_name) not in mapped:
+            log.warning("Custom-model class %s has no configured shelf region; draw/configure its region", class_name)
+
+
+def _threshold_for(detection):
+    return (config.CUSTOM_CONFIDENCE_THRESHOLD if detection.get("source") == "custom"
+            else config.COCO_CONFIDENCE_THRESHOLD)
+
+
+def _scaled_centroid(detection, frame_shape=None):
+    x1, y1, x2, y2 = detection["box"]
+    cx, cy = (float(x1) + float(x2)) / 2, (float(y1) + float(y2)) / 2
+    if frame_shape:
+        height, width = frame_shape[:2]
+        if width and height:
+            cx, cy = cx * 1280 / width, cy * 720 / height
+    return cx, cy
+
+
+def count_detections_per_region(detections, frame_shape=None):
+    """Count filtered model detections whose labels and centers match regions."""
+    regions = _registered_shelf_regions()
+    counts = {pid: 0 for pid in regions}
+    for detection in detections:
+        if float(detection.get("conf", 0)) < _threshold_for(detection):
             continue
-        coords = box.xyxy[0]
-        x1, y1, x2, y2 = coords.tolist() if hasattr(coords, "tolist") else coords
-        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-        # Shelf rectangles are calibrated at 1280×720. Browser cameras may
-        # submit another resolution, so normalize their centroids first.
-        if frame_shape:
-            height, width = frame_shape[:2]
-            if width and height:
-                cx, cy = cx * 1280 / width, cy * 720 / height
-        for product_id, region in config.SHELF_REGIONS.items():
-            if point_in_region(cx, cy, region):
-                if label_matches_region(label, product_id, region):
-                    counts[product_id] += 1
-                else:
-                    log.warning("Skipping unsupported class %r in %s region", label, product_id)
-                break
+        label = detection["label"]
+        cx, cy = _scaled_centroid(detection, frame_shape)
+        matches = [(pid, region) for pid, region in regions.items()
+                   if point_in_region(cx, cy, region) and
+                   any(label_matches(label, expected) for expected in region["model_labels"])]
+        if not matches:
+            continue
+        if matches[0][0] in counts:
+            counts[matches[0][0]] += 1
     return counts
 
 
-def _name_for(results, class_id):
-    """Return a model label whether Ultralytics supplied a list or a dict."""
-    names = results.names
-    return str(names.get(class_id, "") if hasattr(names, "get") else names[class_id])
-
-
-def unknown_detections_per_region(results):
-    """Return high-confidence labels in shelf regions that cannot be counted.
-
-    Detections whose exact model label does not match their shelf region are
-    surfaced to an operator instead of changing inventory.
-    """
+def unknown_detections_per_region(detections, frame_shape=None):
+    """Return only unmapped custom-model detections inside configured regions."""
     unknown = []
-    for box in results.boxes:
-        class_id = int(box.cls[0])
-        confidence = float(box.conf[0])
-        if confidence < config.CONFIDENCE_THRESHOLD:
+    regions = _registered_shelf_regions()
+    mapped_labels = {normalize_label(label) for region in regions.values() for label in region["model_labels"]}
+    for detection in detections:
+        if detection.get("source") != "custom":
             continue
-        label = _name_for(results, class_id)
-        if label not in config.SHELF_REGIONS:
-            log.warning("Skipping unsupported model class %r", label)
+        confidence = float(detection.get("conf", 0))
+        if confidence < config.CUSTOM_CONFIDENCE_THRESHOLD or normalize_label(detection["label"]) in mapped_labels:
             continue
-        coords = box.xyxy[0]
-        x1, y1, x2, y2 = coords.tolist() if hasattr(coords, "tolist") else coords
-        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-        shape = getattr(results, "orig_shape", None)
-        if shape:
-            height, width = shape[:2]
-            if width and height:
-                cx, cy = cx * 1280 / width, cy * 720 / height
-        for product_id, region in config.SHELF_REGIONS.items():
-            if not point_in_region(cx, cy, region):
-                continue
-            if not label_matches_region(label, product_id, region):
-                unknown.append({"label": label, "product_id": product_id, "confidence": confidence})
-            break
+        cx, cy = _scaled_centroid(detection, frame_shape)
+        for product_id, region in regions.items():
+            if point_in_region(cx, cy, region):
+                unknown.append({"label": detection["label"], "product_id": product_id,
+                                "confidence": confidence, "source": "custom"})
+                break
     return unknown
+
+
+def explain_detection(detection, frame_shape=None):
+    """Return (counted, reason) for one raw candidate, for diagnostics."""
+    source = detection.get("source")
+    label = detection.get("label", "")
+    if source == "coco" and normalize_label(label) not in config.COCO_ALLOWED_CLASSES:
+        return False, "discarded COCO class (not apple, banana, or orange)"
+    if float(detection.get("conf", 0)) < _threshold_for(detection):
+        return False, f"below threshold ({_threshold_for(detection):.2f})"
+    cx, cy = _scaled_centroid(detection, frame_shape)
+    containing = []
+    for pid, definition in config.SHELF_REGIONS.items():
+        region = {"box": definition.get("box", definition) if isinstance(definition, dict) else definition,
+                  "model_labels": _region_model_labels(pid, definition)}
+        if point_in_region(cx, cy, region):
+            containing.append((pid, region))
+    if not containing:
+        return False, "outside every configured region"
+    matching = [(pid, region) for pid, region in containing
+                if any(label_matches(label, expected) for expected in region["model_labels"])]
+    if not matching:
+        return False, "label mismatch for the region containing this detection"
+    product_ids = {item["product_id"] for item in database.get_all_products()}
+    if matching[0][0] not in product_ids:
+        return False, f"region {matching[0][0]} has no matching product in the database"
+    return True, f"counted in {matching[0][0]}"
 
 
 class ShelfReconciler:
@@ -121,7 +182,10 @@ class ShelfReconciler:
 
         changed = {}
         for product_id, observed_count in counts.items():
-            previous_count = self.baseline.get(product_id, observed_count)
+            if product_id not in self.baseline:
+                self.baseline[product_id] = observed_count
+                continue
+            previous_count = self.baseline[product_id]
             delta = observed_count - previous_count
             if not delta:
                 continue
@@ -162,16 +226,12 @@ class ShelfReconciler:
 
 
 class CameraDetector:
-    """Lazily opens an integrated/USB webcam and runs in-memory inference."""
+    """Lazily opens a webcam and uses the process-wide shared detector."""
 
     def __init__(self):
         import cv2
-        from ultralytics import YOLO
-
         self.cv2 = cv2
-        if not os.path.exists(config.YOLO_MODEL_PATH):
-            raise RuntimeError(f"YOLO model not found: {config.YOLO_MODEL_PATH}.")
-        self.model = YOLO("best.pt")
+        self.detector = get_detector()
         self.cap = None
 
     def _open_camera(self):
@@ -201,12 +261,9 @@ class CameraDetector:
             self.cap = None
             return None
         try:
-            # Inference -> filter -> region match; frame remains in memory only.
-            # Pass the configured threshold to YOLO itself.  Otherwise
-            # Ultralytics' default (0.25) silently discards candidates before
-            # our own threshold check can inspect them.
-            results = self.model(frame, conf=config.CONFIDENCE_THRESHOLD, verbose=False)[0]
-            return count_detections_per_region(results, frame.shape), unknown_detections_per_region(results)
+            detections = self.detector.detect(frame)
+            return (count_detections_per_region(detections, frame.shape),
+                    unknown_detections_per_region(detections, frame.shape))
         except Exception as exc:
             log.exception("YOLO inference failed: %s", exc)
             return None
@@ -219,7 +276,7 @@ class CameraDetector:
             self.cap = None
 
 
-def calibrate_region(product_id, label=None, camera_index=None):
+def calibrate_region(product_id, label=None, camera_index=None, model_labels=None):
     """Draw a one-time shelf rectangle and add it to ``config.SHELF_REGIONS``.
 
     Press Enter/Space to accept; Esc cancels. No calibration image is saved.
@@ -237,11 +294,16 @@ def calibrate_region(product_id, label=None, camera_index=None):
         ok, frame = cap.read()
         if not ok:
             raise RuntimeError("Camera opened but did not return a calibration frame")
-        x, y, width, height = cv2.selectROI("Draw shelf region then press Enter", frame, showCrosshair=True)
-        if width <= 0 or height <= 0:
+        x, y, roi_width, roi_height = cv2.selectROI("Draw shelf region then press Enter", frame, showCrosshair=True)
+        if roi_width <= 0 or roi_height <= 0:
             return None
-        box = (int(x), int(y), int(x + width), int(y + height))
-        config.SHELF_REGIONS[product_id] = {"box": box, "label": label or product_id}
+        frame_height, frame_width = frame.shape[:2]
+        scale_x = 1280 / frame_width
+        scale_y = 720 / frame_height
+        box = (int(x * scale_x), int(y * scale_y),
+               int((x + roi_width) * scale_x), int((y + roi_height) * scale_y))
+        labels = model_labels or [label or product_id]
+        config.SHELF_REGIONS[product_id] = {"box": box, "model_labels": labels}
         return box
     finally:
         cap.release()
@@ -254,6 +316,13 @@ def run_detection_loop(stop_event: threading.Event, on_cycle=None):
         detector = CameraDetector()
     except Exception as exc:
         log.error("Camera worker not started: %s", exc)
+        return
+    try:
+        model_names = detector.detector.custom_model.names
+        model_names = list(model_names.values()) if hasattr(model_names, "values") else list(model_names)
+        warn_region_configuration(model_names)
+    except RuntimeError:
+        log.exception("Custom model is unavailable; camera worker will stop")
         return
     interval = getattr(config, "DETECTION_INTERVAL", config.DETECTION_INTERVAL_SECONDS)
     reconciler = ShelfReconciler()

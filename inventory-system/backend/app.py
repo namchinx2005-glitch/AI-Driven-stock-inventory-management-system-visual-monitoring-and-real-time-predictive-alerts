@@ -10,11 +10,13 @@ import base64
 import binascii
 import os
 import math
+import uuid
 from datetime import date, timedelta
 from functools import wraps
 
-from flask import Flask, jsonify, request, render_template
+from flask import Flask, jsonify, request, render_template, send_from_directory
 from flask_cors import CORS
+from werkzeug.utils import secure_filename
 
 import config
 import database
@@ -25,7 +27,9 @@ from camera_worker import (
     count_detections_per_region,
     run_detection_loop,
     unknown_detections_per_region,
+    warn_region_configuration,
 )
+from detector import get_detector
 from alerts import evaluate_alerts, evaluate_current_inventory_alerts
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -61,8 +65,19 @@ def dashboard():
     camera is not interrupted when an operator opens POS, inventory, or
     analytics.
     """
+    labels = sorted(set(config.CUSTOM_MODEL_CLASSES) | set(config.COCO_ALLOWED_CLASSES) |
+                    {str(model_label)
+                     for product_id, region in config.SHELF_REGIONS.items()
+                     for model_label in (region.get("model_labels", region.get("label", product_id))
+                                         if isinstance(region, dict) else product_id)
+                     for model_label in (model_label if isinstance(model_label, (list, tuple, set)) else [model_label])})
     return render_template("dashboard.html", poll_seconds=config.DASHBOARD_POLL_SECONDS,
-                           detection_seconds=config.DETECTION_INTERVAL_SECONDS)
+                           detection_seconds=config.DETECTION_INTERVAL_SECONDS, shelf_labels=labels)
+
+
+@app.route("/uploads/<path:filename>")
+def uploaded_product_image(filename):
+    return send_from_directory(os.path.join(app.root_path, "uploads"), filename)
 
 
 # Authentication decorator
@@ -190,7 +205,9 @@ def api_forecast_comparison(product_id):
 def api_health():
     return jsonify({"status": "ok", "detection_source": config.DETECTION_SOURCE,
                     "model": config.DETECTION_MODEL_NAME,
-                    "model_ready": os.path.exists(config.YOLO_MODEL_PATH)})
+                    "model_ready": os.path.exists(config.CUSTOM_MODEL_PATH),
+                    "coco_model_ready": os.path.exists(config.COCO_MODEL_PATH) or
+                                        os.path.exists(os.path.join(config.BACKEND_DIR, "yolo11n.pt"))})
 
 
 # Authentication endpoints
@@ -254,29 +271,66 @@ def api_product_detail(product_id):
 @require_manager
 def api_create_product():
     """Create a new product (manager only)."""
-    data = request.get_json()
-    required_fields = ['product_id', 'name', 'price']
-    if not all(field in data for field in required_fields):
-        return jsonify({"error": "Missing required fields"}), 400
+    if request.user.get('role') != 'manager':
+        return jsonify({"error": "Only the manager can add products"}), 403
+    data = request.form if request.mimetype == "multipart/form-data" else (request.get_json(silent=True) or {})
+    name = str(data.get('name', '')).strip()
+    try:
+        price = float(data.get('price', 0))
+        initial_stock = int(data.get('initial_stock', data.get('quantity', 0)))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Price must be a number and quantity must be a whole number"}), 400
+    if not name or price <= 0 or not math.isfinite(price) or initial_stock < 0:
+        return jsonify({"error": "Enter a product name, a positive USD price, and a non-negative whole-number quantity"}), 400
+    product_id = str(data.get('product_id') or name).strip().lower()
+    product_id = ''.join(char if char.isalnum() or char == '_' else '_' for char in product_id)
+    product_id = '_'.join(part for part in product_id.split('_') if part)[:80]
+    if not product_id:
+        product_id = uuid.uuid4().hex[:12]
+    image_url = data.get('image_url')
+    image = request.files.get('image') if request.mimetype == "multipart/form-data" else None
+    if image and image.filename:
+        extension = os.path.splitext(secure_filename(image.filename))[1].lower()
+        if extension not in {'.jpg', '.jpeg', '.png', '.webp', '.gif'}:
+            return jsonify({"error": "Product picture must be JPG, PNG, WEBP, or GIF"}), 400
+        upload_dir = os.path.join(app.root_path, "uploads")
+        os.makedirs(upload_dir, exist_ok=True)
+        filename = f"{uuid.uuid4().hex}{extension}"
+        image.save(os.path.join(upload_dir, filename))
+        image_url = f"/uploads/{filename}"
+    camera_label = str(data.get('camera_label') or '').strip() or None
+    allowed_labels = set(config.CUSTOM_MODEL_CLASSES) | set(config.COCO_ALLOWED_CLASSES)
+    for product_id, region in config.SHELF_REGIONS.items():
+        labels = region.get("model_labels", region.get("label", product_id)) if isinstance(region, dict) else product_id
+        allowed_labels.update(labels if isinstance(labels, (list, tuple, set)) else [labels])
+    if camera_label and camera_label not in allowed_labels:
+        return jsonify({"error": "Choose a camera class configured for this system"}), 400
+    if camera_label and any(product.get("camera_label") == camera_label for product in database.get_all_products()):
+        return jsonify({"error": "That camera class is already assigned to an inventory product"}), 400
     
     try:
         database.create_product(
-            product_id=data['product_id'],
-            name=data['name'],
+            product_id=product_id,
+            name=name,
             description=data.get('description'),
-            price=float(data['price']),
+            price=price,
             category=data.get('category'),
             sku=data.get('sku'),
             barcode=data.get('barcode'),
-            image_url=data.get('image_url')
+            image_url=image_url,
+            camera_label=camera_label
         )
-        initial_stock = int(data.get('initial_stock') or 0)
         if initial_stock > 0:
-            database.receive_stock(data['product_id'], initial_stock, 'manual_receipt', request.user['user_id'], 'Initial stock')
+            database.receive_stock(product_id, initial_stock, 'manual_receipt', request.user['user_id'], 'Initial stock')
         else:
-            database.set_stock_count(data['product_id'], 0, request.user['user_id'], 'Initial stock')
-        return jsonify({"message": "Product created successfully"}), 201
+            database.set_stock_count(product_id, 0, request.user['user_id'], 'Initial stock')
+        return jsonify({"message": "Product created successfully", "product_id": product_id}), 201
     except Exception as e:
+        if image_url and image_url.startswith('/uploads/'):
+            try:
+                os.remove(os.path.join(app.root_path, image_url.lstrip('/').replace('/', os.sep)))
+            except OSError:
+                pass
         return jsonify({"error": str(e)}), 400
 
 
@@ -294,6 +348,10 @@ def api_update_product(product_id):
 @require_manager
 def api_delete_product(product_id):
     """Delete product (manager only)."""
+    if request.user.get('role') != 'manager':
+        return jsonify({"error": "Only the manager can delete products"}), 403
+    if not database.get_product(product_id):
+        return jsonify({"error": "Product not found"}), 404
     database.delete_product(product_id)
     return jsonify({"message": "Product deleted successfully"})
 
@@ -391,11 +449,12 @@ def api_pos_transaction():
         evaluate_alerts({item['product_id']: database.get_latest_count(item['product_id']) or 0 for item in data['items']})
         receipt_items = database.get_transaction_items(transaction_id)
         receipt_total = sum(float(item["total_price"]) for item in receipt_items)
+        receipt_no = database.get_pos_receipt_number(transaction_id)
         return jsonify({"message": "Transaction created successfully", "transaction_id": transaction_id,
                         "receipt": {"system_name": "LedgerLens Inventory", "cashier": request.user.get('full_name', request.user['username']),
                                     "timestamp": __import__('datetime').datetime.utcnow().isoformat(),
                                     "items": receipt_items, "total_amount": receipt_total,
-                                    "payment_method": payment_method}}), 201
+                                    "payment_method": payment_method, "receipt_no": receipt_no}}), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -455,7 +514,7 @@ def api_set_stock_count(product_id):
 @app.route("/api/camera/scan", methods=["POST"])
 @require_auth
 def api_camera_scan():
-    """Run the requested local YOLO model against a browser webcam frame."""
+    """Run shared custom and COCO inference against a browser webcam frame."""
     data = request.get_json() or {}
     image = data.get('image', '')
     if not isinstance(image, str) or ',' not in image:
@@ -469,48 +528,38 @@ def api_camera_scan():
             raise ValueError
     except (ValueError, binascii.Error):
         return jsonify({"error": "The webcam frame was empty or invalid. Wait for the camera preview, then try again."}), 400
-    if not os.path.exists(config.YOLO_MODEL_PATH):
-        return jsonify({"error": f"Trained YOLO model was not found at {config.YOLO_MODEL_PATH}.",
-                        "detections": [], "model_ready": False,
-                        "salt_supported": False}), 503
     try:
         import cv2
         import numpy as np
-        from ultralytics import YOLO
         frame = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
         if frame is None or frame.size == 0:
             return jsonify({"error": "The webcam frame could not be decoded. Wait for the camera preview, then try again."}), 400
-        # Keep model inference and application filtering aligned. In
-        # particular, a temporary threshold below YOLO's 0.25 default must be
-        # honoured while diagnosing a weak custom model.
-        result = YOLO(config.YOLO_MODEL_PATH)(frame, conf=config.CONFIDENCE_THRESHOLD, verbose=False)[0]
-        names = result.names
-        detections = []
-        for box in result.boxes:
-            confidence = float(box.conf[0])
-            if confidence < config.CONFIDENCE_THRESHOLD:
-                continue
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            detections.append({"label": names[int(box.cls[0])], "confidence": round(confidence, 3),
-                               "box": [round(x1), round(y1), round(x2), round(y2)]})
-        counts = count_detections_per_region(result, frame.shape)
+        found = get_detector().detect(frame)
+        detections = [{"label": item["label"], "conf": round(item["conf"], 3),
+                       "confidence": round(item["conf"], 3),
+                       "box": [round(value) for value in item["box"]],
+                       "source": item["source"]} for item in found]
+        counts = count_detections_per_region(found, frame.shape)
         updates = _browser_shelf_reconciler.reconcile(counts)
-        unknown = unknown_detections_per_region(result)
+        unknown = unknown_detections_per_region(found, frame.shape)
         _browser_shelf_reconciler.report_unknown(unknown)
-        trained_classes = [str(value) for value in (names.values() if hasattr(names, 'values') else names)]
-        model_labels = {value.lower() for value in trained_classes}
-        salt_supported = "salt" in model_labels
-        notice = (f"{len(detections)} object(s) detected by the trained model. "
-                  f"Trained class(es): {', '.join(trained_classes) or 'none'}.")
+        regions = dict(config.SHELF_REGIONS)
+        supported_classes = list(config.CUSTOM_MODEL_CLASSES) + sorted(config.COCO_ALLOWED_CLASSES)
+        notice = (f"{len(detections)} object(s) detected. Supported classes: "
+                  f"{', '.join(supported_classes)}.")
         if updates:
             update_text = ", ".join(f"{product_id}: {count}" for product_id, count in updates.items())
             notice = f"{notice} Inventory updated — {update_text}."
         elif unknown:
             notice = f"{notice} Unmapped item detected; inventory was not changed."
-        return jsonify({"detections": detections, "model_ready": True, "salt_supported": salt_supported,
+        return jsonify({"detections": detections, "model_ready": True,
+                        "supported_classes": supported_classes,
                         "inventory_updates": updates, "observed_counts": counts,
-                        "shelf_regions": config.SHELF_REGIONS,
+                        "shelf_regions": regions,
                         "unknown_items": unknown, "notice": notice})
+    except RuntimeError as exc:
+        log.error("Camera scan models are unavailable: %s", exc)
+        return jsonify({"error": str(exc), "detections": [], "model_ready": False}), 503
     except Exception as exc:
         log.exception("Camera scan failed")
         return jsonify({"error": f"Scan failed: {exc}"}), 500
@@ -591,6 +640,17 @@ def start_low_stock_reminder_worker():
 
 if __name__ == "__main__":
     database.init_db()
+    try:
+        detector = get_detector()
+        custom_classes = detector.custom_model.names
+        custom_classes = list(custom_classes.values()) if hasattr(custom_classes, "values") else list(custom_classes)
+        warn_region_configuration(custom_classes)
+        # Accessing the property above also logs the model classes and attempts
+        # the optional COCO model load exactly once at process startup.
+        _ = detector.coco_model
+    except RuntimeError:
+        log.exception("Custom detection model is unavailable; dashboard will run without camera detection")
+        warn_region_configuration()
     start_low_stock_reminder_worker()
     if config.START_CAMERA_WORKER_ON_BOOT:
         start_background_worker()

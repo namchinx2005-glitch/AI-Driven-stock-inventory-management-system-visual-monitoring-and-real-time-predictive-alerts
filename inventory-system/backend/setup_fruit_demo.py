@@ -1,7 +1,7 @@
-"""Create the three fruit SKUs supported by the built-in COCO demo model.
+"""Create the apple, banana, and orange SKUs supported by the COCO model.
 
-Run this once before starting the application in fruit mode.  It is safe to
-run again: existing products and stock counts are left untouched.
+Run once before calibrating the fruit shelf regions. Existing products and
+stock counts are left untouched.
 """
 import database
 
@@ -22,7 +22,7 @@ def main():
         database.create_product(product_id, name, description, price, category)
         database.set_stock_count(product_id, 0, note="Fruit demo product created")
         print(f"Created {product_id}.")
-    print("Fruit setup complete. Set DETECTION_PROFILE=fruit before running app.py.")
+    print("Fruit setup complete. Calibrate apple, banana, and orange regions in config.py before camera counting.")
 
 
 if __name__ == "__main__":

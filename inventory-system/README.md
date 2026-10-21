@@ -3,51 +3,39 @@
 Implements the architecture in Chapter 3: a Flask + SQLite backend (detection worker,
 moving-average + LSTM forecasting, multi-level alerting) and a Flask/Jinja dashboard.
 
-## Quick start — real camera + YOLO26 (this must run on your own laptop)
+## Quick start — dual-model shelf detection
 
-**Important: this runs locally on your machine, not in a cloud sandbox.** I (Claude) can
-write and test this code, but I have no access to your laptop's webcam — you need to run
-these steps yourself, in a normal terminal on the machine with the camera attached.
+Run the app locally on the machine that has the webcam. `best.pt` must be your
+custom Roboflow-trained weights and should be placed in `backend/best.pt`.
+`yolo26n.pt` is the default COCO weights file; if it is not present, the backend
+will try `yolo11n.pt`. Missing COCO weights disable fruit detections only;
+custom-model inference continues. The COCO detector keeps only apple, banana,
+and orange. The custom model keeps its original class names:
+`Gloria_biscuits`, `Gunanzi_snack`, and `Mirinda_apple`.
 
-**1. Install dependencies**
-```bash
-cd backend
-pip install -r requirements.txt      # now includes opencv-python + ultralytics
-```
+The six region IDs are `gloria_biscuits`, `gunanzi_snack`, `mirinda_apple`,
+`apple`, `banana`, and `orange`. Create matching products in the database first.
+`SHELF_REGIONS` intentionally starts empty: no coordinates are guessed. Draw
+and configure one region per product with `python calibrate_regions.py`, run
+once for each of the six IDs. For each, enter the exact model label:
+`Gloria_biscuits`, `Gunanzi_snack`, `Mirinda_apple`, `apple`, `banana`, or
+`orange`. Copy each printed box and `model_labels` entry into
+`backend/config.py` under `SHELF_REGIONS`. Boxes are converted into 1280x720
+coordinates regardless of the camera's actual resolution.
 
-**2. Calibrate your shelf regions** — the placeholder boxes in `config.py` almost
-certainly don't match your real shelf. Run:
-```bash
-python calibrate_regions.py
-```
-This opens your webcam, grabs one frame with a coordinate grid drawn over it, and saves
-`calibration_frame.jpg`. Open that image, read off the (x1, y1, x2, y2) pixel box around
-each product's shelf spot, and paste those numbers into `SHELF_REGIONS` in `config.py`.
+Start the app from `backend` with `python app.py`, open `http://localhost:5000`,
+and select **Start camera**. The reconciler waits for three stable readings to
+establish its baseline, then stable increases add stock and stable decreases
+record sales and reduce stock. To inspect detection output without changing
+inventory, stop the browser camera and run `python diagnose_camera.py --show`.
+Use `python diagnose_camera.py --image path/to/image.jpg` to inspect a still
+image. Both diagnostics print model paths/classes and the reason a candidate is
+or is not counted.
 
-**3. Seed sales history and start the backend**
-```bash
-python seed_demo_data.py
-python app.py
-```
-The dashboard owns the laptop webcam continuously after **Start camera** is selected. It keeps
-the camera stream and its two-second scan loop running when the operator switches between
-Dashboard, POS, Inventory, and Analytics; a small live preview remains visible off the Camera
-page. It establishes a three-frame baseline, then applies stable additions and removals to
-inventory. For an unattended shelf camera independent of a browser tab, attach a separate
-camera and set `START_CAMERA_WORKER_ON_BOOT = True`; do not have the browser and worker open
-the same physical camera. The first run will download the YOLO26 Nano weights automatically (`yolo26n.pt`, a few MB) —
-that needs an internet connection once, then it's cached locally. If `cap.isOpened()` fails,
-check `CAMERA_INDEX` in `config.py` (0 is the default/built-in camera; try 1 if you have an
-external webcam plugged in), close any other app using the camera, and check your OS's
-camera permission settings for your terminal/Python.
-
-**4. Open the Jinja dashboard**
-
-Open http://localhost:5000 in a modern browser on the same machine. The dashboard is served
-directly by Flask; Vite, Node, and the old React build are no longer required. Browser camera
-permission normally requires `localhost` or HTTPS, so use `http://localhost:5000` rather than
-a LAN IP when using the laptop webcam. The dashboard refreshes inventory and alerts every five
-seconds and scans camera frames every two seconds.
+For dependencies, run `pip install -r requirements.txt` in the backend
+environment. Do not enable both the browser camera and the background camera
+worker on the same physical webcam. For a dedicated worker camera, set
+`START_CAMERA_WORKER_ON_BOOT = True` in `config.py`.
 
 ## If you just want to demo the UI without a camera
 
@@ -84,6 +72,19 @@ online and enabled for a queued SMS to reach the phone.
 Gmail is configured for `smtp.gmail.com` over SSL port `465`. Until the required Textbee or
 SMTP credentials are set, that channel runs in **dry-run mode**:
 the alert is logged and displayed in the dashboard but is not delivered.
+
+## Automated restock intelligence
+
+Product categories are normalized on startup; `Drinks`, `drink`, and recognised juice/water
+names become **Beverages**. Reorder recommendations use the last 30 days of recorded sales,
+seven supplier lead-time days, and five safety-stock days. Record every POS sale and delivery,
+then check each suggestion's data-quality note before ordering.
+
+Zimbabwe beverage seasonality is not a fixed assumption: the system applies a multiplier only
+after it has at least 14 observed beverage-sales days in both the current seasonal period and
+neutral months. Until then the multiplier remains 1.00 and the dashboard explains why. A manager
+or administrator should use **Mark this week reviewed** after reviewing quantities each week;
+the review is stored for the current Monday-to-Sunday week.
 
 ## What maps to what in Chapter 3
 
