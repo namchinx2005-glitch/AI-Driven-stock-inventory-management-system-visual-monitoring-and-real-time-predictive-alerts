@@ -72,7 +72,8 @@ def dashboard():
                                          if isinstance(region, dict) else product_id)
                      for model_label in (model_label if isinstance(model_label, (list, tuple, set)) else [model_label])})
     return render_template("dashboard.html", poll_seconds=config.DASHBOARD_POLL_SECONDS,
-                           detection_seconds=config.DETECTION_INTERVAL_SECONDS, shelf_labels=labels)
+                           detection_seconds=config.DETECTION_INTERVAL_SECONDS, shelf_labels=labels,
+                           server_camera=config.START_CAMERA_WORKER_ON_BOOT)
 
 
 @app.route("/uploads/<path:filename>")
@@ -187,7 +188,7 @@ def api_burn_rate(product_id):
     if request.method == "OPTIONS":
         return "", 200
         
-    if product_id not in config.SHELF_REGIONS:
+    if not database.get_product(product_id):
         return jsonify({"error": "unknown product_id"}), 404
     daily = database.get_daily_sales(product_id, config.BURN_RATE_WINDOW_DAYS)
     return jsonify([{"day": d, "units_sold": qty} for d, qty in daily])
@@ -196,7 +197,7 @@ def api_burn_rate(product_id):
 @app.route("/api/forecast-comparison/<product_id>", methods=["GET"])
 def api_forecast_comparison(product_id):
     """Moving average vs LSTM prediction, side by side."""
-    if product_id not in config.SHELF_REGIONS:
+    if not database.get_product(product_id):
         return jsonify({"error": "unknown product_id"}), 404
     return jsonify(forecasting.forecast_comparison(product_id))
 
@@ -277,16 +278,35 @@ def api_create_product():
     name = str(data.get('name', '')).strip()
     try:
         price = float(data.get('price', 0))
-        initial_stock = int(data.get('initial_stock', data.get('quantity', 0)))
     except (TypeError, ValueError):
-        return jsonify({"error": "Price must be a number and quantity must be a whole number"}), 400
-    if not name or price <= 0 or not math.isfinite(price) or initial_stock < 0:
-        return jsonify({"error": "Enter a product name, a positive USD price, and a non-negative whole-number quantity"}), 400
+        return jsonify({"error": "Price must be a number"}), 400
+    if not name or price <= 0 or not math.isfinite(price):
+        return jsonify({"error": "Enter a product name and a positive USD price"}), 400
     product_id = str(data.get('product_id') or name).strip().lower()
-    product_id = ''.join(char if char.isalnum() or char == '_' else '_' for char in product_id)
-    product_id = '_'.join(part for part in product_id.split('_') if part)[:80]
+    product_id = ''.join(char if char.isalnum() or char in {'_', '-'} else '_' for char in product_id)
+    product_id = product_id.replace('__', '_')[:80]
     if not product_id:
         product_id = uuid.uuid4().hex[:12]
+    camera_label = str(data.get('camera_label') or '').strip() or None
+    if not camera_label:
+        return jsonify({"error": "Select a supported camera class so the shelf camera can count this product"}), 400
+    allowed_labels = set(config.CUSTOM_MODEL_CLASSES) | set(config.COCO_ALLOWED_CLASSES)
+    camera_region_ids = {}
+    for product_id, region in config.SHELF_REGIONS.items():
+        labels = region.get("model_labels", region.get("label", product_id)) if isinstance(region, dict) else product_id
+        labels = labels if isinstance(labels, (list, tuple, set)) else [labels]
+        allowed_labels.update(labels)
+        for label in labels:
+            camera_region_ids.setdefault(''.join(char.casefold() for char in str(label) if char.isalnum()), product_id)
+    if camera_label:
+        normalized_label = ''.join(char.casefold() for char in camera_label if char.isalnum())
+        if normalized_label in camera_region_ids:
+            product_id = camera_region_ids[normalized_label]
+    if camera_label and camera_label not in allowed_labels:
+        return jsonify({"error": "Choose a camera class configured for this system"}), 400
+    if camera_label and any(product.get("camera_label") == camera_label for product in database.get_all_products()):
+        return jsonify({"error": "That camera class is already assigned to an inventory product"}), 400
+
     image_url = data.get('image_url')
     image = request.files.get('image') if request.mimetype == "multipart/form-data" else None
     if image and image.filename:
@@ -298,15 +318,6 @@ def api_create_product():
         filename = f"{uuid.uuid4().hex}{extension}"
         image.save(os.path.join(upload_dir, filename))
         image_url = f"/uploads/{filename}"
-    camera_label = str(data.get('camera_label') or '').strip() or None
-    allowed_labels = set(config.CUSTOM_MODEL_CLASSES) | set(config.COCO_ALLOWED_CLASSES)
-    for product_id, region in config.SHELF_REGIONS.items():
-        labels = region.get("model_labels", region.get("label", product_id)) if isinstance(region, dict) else product_id
-        allowed_labels.update(labels if isinstance(labels, (list, tuple, set)) else [labels])
-    if camera_label and camera_label not in allowed_labels:
-        return jsonify({"error": "Choose a camera class configured for this system"}), 400
-    if camera_label and any(product.get("camera_label") == camera_label for product in database.get_all_products()):
-        return jsonify({"error": "That camera class is already assigned to an inventory product"}), 400
     
     try:
         database.create_product(
@@ -320,10 +331,9 @@ def api_create_product():
             image_url=image_url,
             camera_label=camera_label
         )
-        if initial_stock > 0:
-            database.receive_stock(product_id, initial_stock, 'manual_receipt', request.user['user_id'], 'Initial stock')
-        else:
-            database.set_stock_count(product_id, 0, request.user['user_id'], 'Initial stock')
+        # New products always begin at zero. Stable camera observations record
+        # the opening shelf count; the product form/API cannot seed stock.
+        database.set_stock_count(product_id, 0, request.user['user_id'], 'Product created; awaiting camera count')
         return jsonify({"message": "Product created successfully", "product_id": product_id}), 201
     except Exception as e:
         if image_url and image_url.startswith('/uploads/'):
@@ -483,38 +493,22 @@ def api_transaction_items(transaction_id):
 @app.route("/api/inventory/receive", methods=["POST"])
 @require_auth
 def api_receive_stock():
-    """Manual or camera-confirmed stock receipt; both paths are auditable."""
-    if request.user.get('role') not in ('admin', 'manager', 'sales', 'sales_person'):
-        return jsonify({"error": "This role cannot receive stock"}), 403
-    data = request.get_json() or {}
-    try:
-        quantity = int(data.get('quantity', 0))
-        source = data.get('source', 'manual')
-        kind = 'camera_receipt' if source == 'camera' else 'manual_receipt'
-        count = database.receive_stock(data.get('product_id', ''), quantity, kind,
-                                       request.user['user_id'], data.get('note', ''))
-        evaluate_alerts({data['product_id']: count})
-        return jsonify({"message": "Stock received", "current_stock": count}), 201
-    except (ValueError, TypeError) as exc:
-        return jsonify({"error": str(exc)}), 400
+    """Reject manual stock receipts; camera reconciliation updates stock internally."""
+    return jsonify({"error": "Manual stock receipts are disabled. Inventory is updated by the shelf camera."}), 403
 
 
 @app.route("/api/inventory/<product_id>/count", methods=["PUT"])
 @require_manager
 def api_set_stock_count(product_id):
-    data = request.get_json() or {}
-    try:
-        count = database.set_stock_count(product_id, int(data.get('count')), request.user['user_id'], data.get('note', 'Manual stock count'))
-        evaluate_alerts({product_id: count})
-        return jsonify({"message": "Stock count saved", "current_stock": count})
-    except (ValueError, TypeError) as exc:
-        return jsonify({"error": str(exc)}), 400
+    return jsonify({"error": "Manual stock counts are disabled. Inventory counts are updated by the shelf camera and recorded sales."}), 403
 
 
 @app.route("/api/camera/scan", methods=["POST"])
 @require_auth
 def api_camera_scan():
     """Run shared custom and COCO inference against a browser webcam frame."""
+    if config.START_CAMERA_WORKER_ON_BOOT:
+        return jsonify({"error": "The dedicated backend camera worker owns the camera."}), 409
     data = request.get_json() or {}
     image = data.get('image', '')
     if not isinstance(image, str) or ',' not in image:
@@ -543,6 +537,8 @@ def api_camera_scan():
         updates = _browser_shelf_reconciler.reconcile(counts)
         unknown = unknown_detections_per_region(found, frame.shape)
         _browser_shelf_reconciler.report_unknown(unknown)
+        if updates:
+            evaluate_alerts(updates)
         regions = dict(config.SHELF_REGIONS)
         supported_classes = list(config.CUSTOM_MODEL_CLASSES) + sorted(config.COCO_ALLOWED_CLASSES)
         notice = (f"{len(detections)} object(s) detected. Supported classes: "

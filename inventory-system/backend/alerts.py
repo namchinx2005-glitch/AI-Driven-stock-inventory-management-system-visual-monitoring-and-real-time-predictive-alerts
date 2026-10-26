@@ -28,9 +28,16 @@ def _thresholds_for(product_id: str):
 def _label_for(product_id: str) -> str:
     region = config.SHELF_REGIONS.get(product_id)
     if region:
-        return region["label"]
+        if isinstance(region, dict) and region.get("label"):
+            return str(region["label"])
     product = database.get_product(product_id)
-    return product["name"] if product else product_id
+    if product:
+        return product["name"]
+    if isinstance(region, dict):
+        labels = region.get("model_labels") or []
+        if labels:
+            return str(labels[0])
+    return product_id
 
 
 def _alert_text(product_id: str, current_stock: int, level: str) -> tuple[str, str]:
@@ -156,7 +163,7 @@ def evaluate_alerts(counts: dict):
             # preserves the 10/30-minute cadence if a provider is temporarily
             # unavailable instead of retrying every one-minute scan.
             database.update_alert_timestamp(product_id, level)
-            database.record_alert(product_id, level, message, sms_sent)
+            database.record_alert(product_id, level, message, sms_sent, email_sent=email_sent)
 
 
 def evaluate_current_inventory_alerts():

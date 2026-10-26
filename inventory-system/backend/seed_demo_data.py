@@ -49,6 +49,33 @@ def seed_products():
     
     products_data = [
         {
+            "product_id": "gloria-biscuits",
+            "name": "Gloria Biscuits",
+            "description": "Shelf product tracked by the fine-tuned camera model",
+            "price": 1.50,
+            "category": "Snacks",
+            "sku": "GLORIA-BISCUITS",
+            "camera_label": "Gloria_biscuits",
+        },
+        {
+            "product_id": "gunanzi-snacks",
+            "name": "Gunanzi Snacks",
+            "description": "Shelf product tracked by the fine-tuned camera model",
+            "price": 1.25,
+            "category": "Snacks",
+            "sku": "GUNANZI-SNACKS",
+            "camera_label": "Gunanzi_snack",
+        },
+        {
+            "product_id": "mirinda-apple",
+            "name": "Mirinda Apple",
+            "description": "Shelf product tracked by the fine-tuned camera model",
+            "price": 1.00,
+            "category": "Beverages",
+            "sku": "MIRINDA-APPLE",
+            "camera_label": "Mirinda_apple",
+        },
+        {
             "product_id": "sugar_2kg",
             "name": "Sugar 2kg",
             "description": "Premium white sugar 2kg package",
@@ -78,6 +105,8 @@ def seed_products():
     ]
     
     for product in products_data:
+        if database.get_product(product["product_id"]):
+            continue
         database.create_product(**product)
     
     print(f"✓ Products created: {len(products_data)} products")

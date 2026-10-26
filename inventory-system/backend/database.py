@@ -2,12 +2,17 @@
 Persistence & Analytics Layer (Chapter 3, section 3.3.1 / 3.6.2).
 Two operational tables: stock_logs (periodic counts) and sales_events (inventory drops).
 """
+import os
 import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
-DB_PATH = "inventory.db"
+# Resolve the database beside this module by default so launching from the
+# repository root or backend directory always opens the same live inventory.
+DB_PATH = os.path.abspath(os.getenv(
+    "INVENTORY_DB_PATH", os.path.join(os.path.dirname(__file__), "inventory.db")
+))
 _lock = threading.Lock()
 
 _CATEGORY_ALIASES = {
@@ -136,7 +141,8 @@ def init_db():
                 level TEXT NOT NULL,
                 message TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
-                sms_sent INTEGER NOT NULL DEFAULT 0
+                sms_sent INTEGER NOT NULL DEFAULT 0,
+                email_sent INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS sms_dispatch_log (
@@ -183,6 +189,10 @@ def init_db():
         product_columns = {row[1] for row in conn.execute("PRAGMA table_info(products)")}
         if "camera_label" not in product_columns:
             conn.execute("ALTER TABLE products ADD COLUMN camera_label TEXT")
+
+        alert_columns = {row[1] for row in conn.execute("PRAGMA table_info(alerts)")}
+        if "email_sent" not in alert_columns:
+            conn.execute("ALTER TABLE alerts ADD COLUMN email_sent INTEGER NOT NULL DEFAULT 0")
 
         # Migrate the initial two-role table so existing installations can add
         # admins and accountants too.
@@ -231,13 +241,75 @@ def receive_stock(product_id: str, quantity: int, movement_type: str, user_id: i
         raise ValueError("Product not found")
     current = get_latest_count(product_id) or 0
     new_count = current + quantity
+    timestamp = datetime.utcnow().isoformat()
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO stock_movements (product_id, quantity, movement_type, note, user_id) VALUES (?, ?, ?, ?, ?)",
-            (product_id, quantity, movement_type, note, user_id),
+            "INSERT INTO stock_movements (product_id, quantity, movement_type, note, user_id, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+            (product_id, quantity, movement_type, note, user_id, timestamp),
         )
         conn.execute("INSERT INTO stock_logs (product_id, item_count, timestamp) VALUES (?, ?, ?)",
-                     (product_id, new_count, datetime.utcnow().isoformat()))
+                     (product_id, new_count, timestamp))
+    return new_count
+
+
+def get_known_inventory_changes_since(product_id: str, timestamp: str):
+    """Return persisted receipts and POS sales since a camera observation."""
+    with get_conn() as conn:
+        stock_adjustments = conn.execute(
+            "SELECT COALESCE(SUM(quantity), 0) AS quantity FROM stock_movements "
+            "WHERE product_id = ? AND movement_type IN ('camera_receipt', 'manual_receipt') "
+            "AND timestamp > ?",
+            (product_id, timestamp),
+        ).fetchone()["quantity"]
+        sales = conn.execute(
+            "SELECT COALESCE(SUM(qty_sold), 0) AS quantity FROM sales_events "
+            "WHERE product_id = ? AND sale_type = 'pos' AND timestamp > ?",
+            (product_id, timestamp),
+        ).fetchone()["quantity"]
+    return {"net_delta": int(stock_adjustments or 0) - int(sales or 0)}
+
+
+def apply_camera_delta(product_id: str, delta: int):
+    """Atomically persist an unrecorded camera-observed stock movement."""
+    if not delta:
+        return get_latest_count(product_id) or 0
+    with get_conn() as conn:
+        product = conn.execute(
+            "SELECT 1 FROM products WHERE product_id = ?", (product_id,)
+        ).fetchone()
+        if not product:
+            raise ValueError(f"Product not found: {product_id}")
+        row = conn.execute(
+            "SELECT item_count FROM stock_logs WHERE product_id = ? "
+            "ORDER BY timestamp DESC, id DESC LIMIT 1", (product_id,)
+        ).fetchone()
+        current = int(row["item_count"]) if row else 0
+        timestamp = datetime.utcnow().isoformat()
+        if delta > 0:
+            new_count = current + delta
+            conn.execute(
+                "INSERT INTO stock_movements (product_id, quantity, movement_type, note, timestamp) "
+                "VALUES (?, ?, 'camera_receipt', ?, ?)",
+                (product_id, delta, "Stable shelf-camera increase", timestamp),
+            )
+        else:
+            removed = min(-delta, current)
+            if not removed:
+                return current
+            new_count = current - removed
+            conn.execute(
+                "INSERT INTO sales_events (product_id, qty_sold, timestamp, sale_type) "
+                "VALUES (?, ?, ?, 'auto')", (product_id, removed, timestamp),
+            )
+            conn.execute(
+                "INSERT INTO stock_movements (product_id, quantity, movement_type, note, timestamp) "
+                "VALUES (?, ?, 'sale', ?, ?)",
+                (product_id, removed, "Stable shelf-camera decrease", timestamp),
+            )
+        conn.execute(
+            "INSERT INTO stock_logs (product_id, item_count, timestamp) VALUES (?, ?, ?)",
+            (product_id, new_count, timestamp),
+        )
     return new_count
 
 
@@ -248,18 +320,19 @@ def set_stock_count(product_id: str, count: int, user_id: int = None, note: str 
     if not get_product(product_id):
         raise ValueError("Product not found")
     previous = get_latest_count(product_id) or 0
+    timestamp = datetime.utcnow().isoformat()
     with get_conn() as conn:
-        conn.execute("INSERT INTO stock_movements (product_id, quantity, movement_type, note, user_id) VALUES (?, ?, 'manual_receipt', ?, ?)",
-                     (product_id, count - previous, note, user_id))
+        conn.execute("INSERT INTO stock_movements (product_id, quantity, movement_type, note, user_id, timestamp) VALUES (?, ?, 'manual_receipt', ?, ?, ?)",
+                     (product_id, count - previous, note, user_id, timestamp))
         conn.execute("INSERT INTO stock_logs (product_id, item_count, timestamp) VALUES (?, ?, ?)",
-                     (product_id, count, datetime.utcnow().isoformat()))
+                     (product_id, count, timestamp))
     return count
 
 
 def get_latest_count(product_id: str):
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT item_count FROM stock_logs WHERE product_id = ? ORDER BY timestamp DESC LIMIT 1",
+            "SELECT item_count FROM stock_logs WHERE product_id = ? ORDER BY timestamp DESC, id DESC LIMIT 1",
             (product_id,),
         ).fetchone()
         return row["item_count"] if row else None
@@ -269,7 +342,7 @@ def get_previous_count(product_id: str):
     """Second-most-recent count, used to detect drops (sales_events)."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT item_count FROM stock_logs WHERE product_id = ? ORDER BY timestamp DESC LIMIT 2",
+            "SELECT item_count FROM stock_logs WHERE product_id = ? ORDER BY timestamp DESC, id DESC LIMIT 2",
             (product_id,),
         ).fetchall()
         return rows[1]["item_count"] if len(rows) > 1 else None
@@ -301,12 +374,14 @@ def get_daily_sales(product_id: str, days: int):
         return [(r["day"], r["total"]) for r in rows]
 
 
-def record_alert(product_id: str, level: str, message: str, sms_sent: bool, ts: str = None):
+def record_alert(product_id: str, level: str, message: str, sms_sent: bool,
+                 ts: str = None, email_sent: bool = False):
     ts = ts or datetime.utcnow().isoformat()
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO alerts (product_id, level, message, timestamp, sms_sent) VALUES (?, ?, ?, ?, ?)",
-            (product_id, level, message, ts, int(sms_sent)),
+            "INSERT INTO alerts (product_id, level, message, timestamp, sms_sent, email_sent) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (product_id, level, message, ts, int(sms_sent), int(email_sent)),
         )
 
 
@@ -523,13 +598,19 @@ def create_pos_transaction(user_id: int, items: list, total_amount: float, payme
             
             # Log sale and immediately reduce the operational count so POS sales
             # appear in the dashboard/low-stock alerts without waiting for camera.
+            timestamp = datetime.utcnow().isoformat()
             conn.execute(
                 "INSERT INTO sales_events (product_id, qty_sold, timestamp, sale_type, user_id) VALUES (?, ?, ?, 'pos', ?)",
-                (product_id, quantity, datetime.utcnow().isoformat(), user_id),
+                (product_id, quantity, timestamp, user_id),
+            )
+            conn.execute(
+                "INSERT INTO stock_movements (product_id, quantity, movement_type, note, user_id, timestamp) "
+                "VALUES (?, ?, 'sale', 'POS sale', ?, ?)",
+                (product_id, quantity, user_id, timestamp),
             )
             new_count = available - quantity
             conn.execute("INSERT INTO stock_logs (product_id, item_count, timestamp) VALUES (?, ?, ?)",
-                         (product_id, new_count, datetime.utcnow().isoformat()))
+                         (product_id, new_count, timestamp))
     
     return transaction_id
 

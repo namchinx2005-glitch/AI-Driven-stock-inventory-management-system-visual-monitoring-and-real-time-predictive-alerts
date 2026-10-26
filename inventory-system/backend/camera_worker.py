@@ -5,6 +5,7 @@ writes camera images or video to disk; it persists only inventory records.
 """
 import logging
 import threading
+import time
 from datetime import datetime, timedelta
 
 import config
@@ -45,14 +46,38 @@ def label_matches_region(label, product_id, region):
 def _registered_shelf_regions():
     """Map configured product-ID regions to products currently in inventory."""
     registered = {}
-    products = {product["product_id"]: product for product in database.get_all_products()}
+    products = database.get_all_products()
+    by_id = {product["product_id"]: product for product in products}
+    by_normalized_id = {}
+    for product in products:
+        by_normalized_id.setdefault(normalize_label(product["product_id"]), []).append(product)
+    claimed_product_ids = set()
     for product_id, definition in config.SHELF_REGIONS.items():
-        product = products.get(product_id)
+        labels = _region_model_labels(product_id, definition)
+        product = by_id.get(product_id)
+        if product is None:
+            matches = by_normalized_id.get(normalize_label(product_id), [])
+            if len(matches) == 1:
+                product = matches[0]
+        if product is None:
+            label_matches = [item for item in products if any(
+                label_matches(expected, item.get("camera_label", "")) or
+                label_matches(expected, item.get("name", "")) for expected in labels
+            )]
+            if len(label_matches) == 1:
+                product = label_matches[0]
         if not product:
             continue
+        if product["product_id"] in claimed_product_ids:
+            log.warning("Product %s is mapped to multiple camera regions; only the first region is used",
+                        product["product_id"])
+            continue
+        claimed_product_ids.add(product["product_id"])
         box = definition.get("box", definition) if isinstance(definition, dict) else definition
-        registered[product_id] = {"box": box,
-                                  "model_labels": _region_model_labels(product_id, definition, product)}
+        registered[product["product_id"]] = {
+            "box": box,
+            "model_labels": _region_model_labels(product_id, definition, product),
+        }
     return registered
 
 
@@ -63,9 +88,13 @@ def registered_camera_labels():
 
 def warn_region_configuration(custom_classes=None):
     """Warn about unregistered configured regions and custom classes without zones."""
-    products = {item["product_id"] for item in database.get_all_products()}
-    for product_id in config.SHELF_REGIONS:
-        if product_id not in products:
+    registered = _registered_shelf_regions()
+    for product_id, definition in config.SHELF_REGIONS.items():
+        labels = _region_model_labels(product_id, definition)
+        if not any(normalize_label(product_id) == normalize_label(registered_id) or
+                   any(label_matches(expected, registered_label)
+                       for expected in labels for registered_label in region["model_labels"])
+                   for registered_id, region in registered.items()):
             log.warning("Shelf region %s has no matching product_id in the database", product_id)
     classes = custom_classes or config.CUSTOM_MODEL_CLASSES
     mapped = {normalize_label(label) for region in config.SHELF_REGIONS.values()
@@ -163,53 +192,77 @@ class ShelfReconciler:
         self.last_observed = None
         self.repeat_count = 0
         self.baseline = None
+        self.last_stable_at = None
         self.unknown_alerted_at = {}
+        self._lock = threading.Lock()
 
     def reconcile(self, counts):
-        # One transient bad frame must never move stock. Establish the first
-        # stable camera baseline without overwriting the existing database.
-        if counts == self.last_observed:
-            self.repeat_count += 1
-        else:
-            self.last_observed = dict(counts)
-            self.repeat_count = 1
-        if self.repeat_count < config.STABLE_COUNT_CYCLES:
-            return {}
-        if self.baseline is None:
-            self.baseline = dict(counts)
-            log.info("Established stable shelf baseline: %s", self.baseline)
-            return {}
-
-        changed = {}
-        for product_id, observed_count in counts.items():
-            if product_id not in self.baseline:
-                self.baseline[product_id] = observed_count
-                continue
-            previous_count = self.baseline[product_id]
-            delta = observed_count - previous_count
-            if not delta:
-                continue
-            if not database.get_product(product_id):
-                log.warning("Shelf region %s has no matching product; ignoring count change", product_id)
-                continue
-            if delta > 0:
-                current = database.receive_stock(
-                    product_id, delta, "camera_receipt",
-                    note="Stable shelf-camera increase",
-                )
+        with self._lock:
+            counts = dict(counts)
+            # One transient bad frame must never move stock. Establish the first
+            # stable camera baseline without overwriting the existing database.
+            if counts == self.last_observed:
+                self.repeat_count += 1
             else:
-                current = database.get_latest_count(product_id) or 0
-                removed = min(-delta, current)
-                if not removed:
+                self.last_observed = dict(counts)
+                self.repeat_count = 1
+            if self.repeat_count < config.STABLE_COUNT_CYCLES:
+                return {}
+            observed_at = datetime.utcnow().isoformat()
+            if self.baseline is None:
+                self.baseline = dict(counts)
+                log.info("Established stable shelf baseline: %s", self.baseline)
+                # When a product was initialized at zero, treat the first
+                # stable camera count as its opening shelf receipt. Preserve
+                # any non-zero inventory already recorded in the database.
+                opening_receipts = {}
+                for product_id, observed_count in counts.items():
+                    if observed_count <= 0 or not database.get_product(product_id):
+                        continue
+                    current_stock = database.get_latest_count(product_id) or 0
+                    if current_stock == 0:
+                        opening_receipts[product_id] = database.apply_camera_delta(
+                            product_id, observed_count
+                        )
+                        log.info("Camera recorded opening shelf count for %s: %d",
+                                 product_id, observed_count)
+                    # Start movement reconciliation after the opening receipts so
+                    # they are not mistaken for a later sale or delivery.
+                    self.last_stable_at = datetime.utcnow().isoformat()
+                return opening_receipts
+
+            changed = {}
+            for product_id, observed_count in counts.items():
+                if product_id not in self.baseline:
                     self.baseline[product_id] = observed_count
                     continue
-                current -= removed
-                database.log_sales_event(product_id, removed, sale_type="auto")
-                database.write_stock_log(product_id, current)
-            self.baseline[product_id] = observed_count
-            changed[product_id] = current
-            log.info("Shelf camera reconciled %s by %+d; inventory is now %d", product_id, delta, current)
-        return changed
+                delta = observed_count - self.baseline[product_id]
+                if not delta:
+                    continue
+                if not database.get_product(product_id):
+                    log.warning("Shelf region %s has no matching product; ignoring count change", product_id)
+                    continue
+
+                # POS sales and recorded receipts have already changed the live
+                # database. If the same movement is visible on the shelf, don't
+                # apply it a second time as an automatic camera movement.
+                known = database.get_known_inventory_changes_since(
+                    product_id, self.last_stable_at or ""
+                )
+                known_delta = known["net_delta"]
+                if delta * known_delta > 0 and abs(known_delta) >= abs(delta):
+                    delta = 0
+                else:
+                    delta -= known_delta
+
+                if delta:
+                    current = database.apply_camera_delta(product_id, delta)
+                    changed[product_id] = current
+                    log.info("Shelf camera reconciled %s by %+d; inventory is now %d",
+                             product_id, delta, current)
+                self.baseline[product_id] = observed_count
+            self.last_stable_at = observed_at
+            return changed
 
     def report_unknown(self, detections):
         now = datetime.utcnow()
@@ -329,6 +382,7 @@ def run_detection_loop(stop_event: threading.Event, on_cycle=None):
     log.info("YOLO shelf worker started; one frame every %ss", interval)
     try:
         while not stop_event.is_set():
+            cycle_started = time.monotonic()
             observation = detector.next_counts()
             if observation is not None:
                 counts, unknown = observation
@@ -336,7 +390,10 @@ def run_detection_loop(stop_event: threading.Event, on_cycle=None):
                 reconciler.report_unknown(unknown)
                 # Alert evaluation is synchronous, in this same detection cycle.
                 if on_cycle:
-                    on_cycle(changed)
-            stop_event.wait(interval)
+                    try:
+                        on_cycle(changed)
+                    except Exception:
+                        log.exception("Camera-cycle callback failed; continuing monitoring")
+            stop_event.wait(max(0, cycle_started + interval - time.monotonic()))
     finally:
         detector.close()

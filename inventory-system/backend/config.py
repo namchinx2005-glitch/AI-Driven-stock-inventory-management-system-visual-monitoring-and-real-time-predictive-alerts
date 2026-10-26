@@ -120,11 +120,10 @@ JWT_EXPIRATION_HOURS = int(os.getenv("JWT_EXPIRATION_HOURS", "24"))
 DETECTION_SOURCE = "camera"
 CAMERA_INDEX = 0
 CAMERA_FALLBACK_INDICES = [0, 1, 2]
-# Browser Camera Monitor owns the laptop webcam by default. Enable this only
-# for a dedicated, server-side shelf camera that is not used by the browser.
-# Keep a dedicated shelf camera running whenever the backend is running.
-# Do not open the same physical camera in the browser Camera Monitor as well.
-# The Jinja dashboard owns the webcam by default.  This prevents the backend
-# and browser fighting over one laptop camera.  Set this to True only when a
-# separate dedicated shelf camera is attached to the backend machine.
-START_CAMERA_WORKER_ON_BOOT = False
+# Prefer explicit, user-controlled camera access in the dashboard. The browser
+# starts the camera only when the user clicks Open camera and releases it when
+# Close camera is clicked. Set this environment variable to "true" only for a
+# deployment that intentionally runs the dedicated background camera worker.
+START_CAMERA_WORKER_ON_BOOT = os.getenv("START_CAMERA_WORKER_ON_BOOT", "false").strip().lower() in {
+	"1", "true", "yes", "on"
+}
