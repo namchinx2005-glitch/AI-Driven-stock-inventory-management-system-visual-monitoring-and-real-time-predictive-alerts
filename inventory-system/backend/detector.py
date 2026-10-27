@@ -176,19 +176,28 @@ class DualModelDetector:
 
     def detect(self, frame: Any) -> list[dict[str, Any]]:
         """Return confidence-filtered custom detections and allowed COCO fruit."""
+        return self._detect_at_thresholds(
+            frame,
+            config.CUSTOM_CONFIDENCE_THRESHOLD,
+            config.COCO_CONFIDENCE_THRESHOLD,
+        )
+
+    def _detect_at_thresholds(self, frame: Any, custom_threshold: float,
+                              coco_threshold: float) -> list[dict[str, Any]]:
+        """Run both models on one image using the supplied confidence cutoffs."""
         self._ensure_loaded()
         candidates = []
         with self._inference_lock:
             if self._custom_model:
-                result = self._run_model(self._custom_model, frame, config.CUSTOM_CONFIDENCE_THRESHOLD)
+                result = self._run_model(self._custom_model, frame, custom_threshold)
                 candidates.extend(self._extract(result, "custom"))
             if self._coco_model:
-                result = self._run_model(self._coco_model, frame, config.COCO_CONFIDENCE_THRESHOLD)
+                result = self._run_model(self._coco_model, frame, coco_threshold)
                 candidates.extend(self._extract(result, "coco"))
         custom = [item for item in candidates if item["source"] == "custom"
-                  and item["conf"] >= config.CUSTOM_CONFIDENCE_THRESHOLD]
+                  and item["conf"] >= custom_threshold]
         coco = [item for item in candidates if item["source"] == "coco"
-                and item["conf"] >= config.COCO_CONFIDENCE_THRESHOLD
+                and item["conf"] >= coco_threshold
                 and normalize_label(item["label"]) in config.COCO_ALLOWED_CLASSES]
         merged = list(custom)
         for fruit in coco:
@@ -196,6 +205,66 @@ class DualModelDetector:
                 continue
             merged.append(fruit)
         return merged
+
+    def detect_in_regions(self, frame: Any, regions: dict[str, Any]) -> list[dict[str, Any]]:
+        """Detect full-frame objects, then retry missed product zones on crops.
+
+        The full-frame pass finds objects outside configured zones. Every zone
+        is also inferred as a crop on every cycle, so an incomplete full-frame
+        result cannot hide additional products in a partition. Crop detections
+        are translated back to frame pixels and tagged with their source zone.
+        """
+        height, width = frame.shape[:2]
+        detections = self.detect(frame)
+        for region_id, definition in regions.items():
+            box = definition.get("box", definition) if isinstance(definition, dict) else definition
+            if not isinstance(box, (tuple, list)) or len(box) != 4:
+                continue
+            expected_labels = definition.get("model_labels", []) if isinstance(definition, dict) else []
+            expected = {normalize_label(label) for label in expected_labels}
+            if not expected:
+                expected = {normalize_label(region_id)}
+
+            x1 = max(0, min(width, round(float(box[0]) * width / 1280)))
+            y1 = max(0, min(height, round(float(box[1]) * height / 720)))
+            x2 = max(0, min(width, round(float(box[2]) * width / 1280)))
+            y2 = max(0, min(height, round(float(box[3]) * height / 720)))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            def matches_region(item: dict[str, Any]) -> bool:
+                label_matches = normalize_label(item["label"]) in expected
+                cx = (float(item["box"][0]) + float(item["box"][2])) / 2
+                cy = (float(item["box"][1]) + float(item["box"][3])) / 2
+                return label_matches and x1 <= cx <= x2 and y1 <= cy <= y2
+
+            full_frame_matches = [item for item in detections if matches_region(item)]
+            for item in full_frame_matches:
+                item["region_id"] = region_id
+
+            crop = frame[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+            cropped_detections = self._detect_at_thresholds(
+                crop,
+                getattr(config, "REGION_CUSTOM_CONFIDENCE_THRESHOLD", config.CUSTOM_CONFIDENCE_THRESHOLD),
+                getattr(config, "REGION_COCO_CONFIDENCE_THRESHOLD", config.COCO_CONFIDENCE_THRESHOLD),
+            )
+            for item in cropped_detections:
+                if normalize_label(item["label"]) not in expected:
+                    continue
+                item["box"] = [item["box"][0] + x1, item["box"][1] + y1,
+                               item["box"][2] + x1, item["box"][3] + y1]
+                # The full-frame pass and crop pass often report the same
+                # object. Suppress only that overlap; retain other crop boxes
+                # to recover missed items in the same partition.
+                if any(normalize_label(existing["label"]) == normalize_label(item["label"])
+                       and box_iou(existing["box"], item["box"]) > 0.5
+                       for existing in full_frame_matches):
+                    continue
+                item["region_id"] = region_id
+                detections.append(item)
+        return detections
 
 
 _shared_detector: DualModelDetector | None = None

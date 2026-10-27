@@ -82,3 +82,53 @@ def test_each_model_uses_its_own_confidence_threshold():
     found = DualModelDetector(custom_model=custom, coco_model=coco).detect(object())
 
     assert [(item["label"], item["source"]) for item in found] == [("Gloria_biscuits", "custom")]
+
+
+def test_missed_zone_is_retried_as_crop_and_box_is_restored():
+    import numpy as np
+
+    class CropAwareModel(FakeModel):
+        def __call__(self, frame, conf, verbose):
+            boxes = [] if frame.shape[:2] == (720, 1280) else [
+                FakeBox(0, 0.28, [10, 20, 40, 60])
+            ]
+            return [FakeResult(self.names, boxes)]
+
+    custom = CropAwareModel({0: "Gunanzi_snack"}, [])
+    detector = DualModelDetector(custom_model=custom, coco_model=None)
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    found = detector.detect_in_regions(frame, {
+        "gunanzi-snacks": {"box": (400, 300, 800, 600), "model_labels": ["Gunanzi_snack"]},
+    })
+
+    assert len(found) == 1
+    assert found[0]["region_id"] == "gunanzi-snacks"
+    assert found[0]["box"] == [410.0, 320.0, 440.0, 360.0]
+    assert found[0]["conf"] == 0.28
+
+
+def test_zone_crop_recovers_more_products_than_full_frame_pass():
+    import numpy as np
+
+    class MultiItemModel(FakeModel):
+        def __call__(self, frame, conf, verbose):
+            if frame.shape[:2] == (720, 1280):
+                boxes = [FakeBox(0, 0.8, [420, 330, 460, 390])]
+            else:
+                boxes = [
+                    FakeBox(0, 0.75, [20, 30, 60, 90]),
+                    FakeBox(0, 0.72, [180, 130, 230, 200]),
+                ]
+            return [FakeResult(self.names, boxes)]
+
+    custom = MultiItemModel({0: "Gunanzi_snack"}, [])
+    detector = DualModelDetector(custom_model=custom, coco_model=None)
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    found = detector.detect_in_regions(frame, {
+        "gunanzi-snacks": {"box": (400, 300, 800, 600), "model_labels": ["Gunanzi_snack"]},
+    })
+
+    assert len(found) == 2
+    assert sum(item["region_id"] == "gunanzi-snacks" for item in found) == 2

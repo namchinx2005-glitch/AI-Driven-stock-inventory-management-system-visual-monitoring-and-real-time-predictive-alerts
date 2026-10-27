@@ -105,6 +105,10 @@ def warn_region_configuration(custom_classes=None):
 
 
 def _threshold_for(detection):
+    if detection.get("region_id"):
+        return (getattr(config, "REGION_CUSTOM_CONFIDENCE_THRESHOLD", config.CUSTOM_CONFIDENCE_THRESHOLD)
+                if detection.get("source") == "custom"
+                else getattr(config, "REGION_COCO_CONFIDENCE_THRESHOLD", config.COCO_CONFIDENCE_THRESHOLD))
     return (config.CUSTOM_CONFIDENCE_THRESHOLD if detection.get("source") == "custom"
             else config.COCO_CONFIDENCE_THRESHOLD)
 
@@ -128,8 +132,10 @@ def count_detections_per_region(detections, frame_shape=None):
             continue
         label = detection["label"]
         cx, cy = _scaled_centroid(detection, frame_shape)
+        detection_region = normalize_label(detection.get("region_id", ""))
         matches = [(pid, region) for pid, region in regions.items()
-                   if point_in_region(cx, cy, region) and
+                   if (detection_region == normalize_label(pid) or
+                       (not detection_region and point_in_region(cx, cy, region))) and
                    any(label_matches(label, expected) for expected in region["model_labels"])]
         if not matches:
             continue
@@ -314,7 +320,7 @@ class CameraDetector:
             self.cap = None
             return None
         try:
-            detections = self.detector.detect(frame)
+            detections = self.detector.detect_in_regions(frame, config.SHELF_REGIONS)
             return (count_detections_per_region(detections, frame.shape),
                     unknown_detections_per_region(detections, frame.shape))
         except Exception as exc:

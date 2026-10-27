@@ -51,6 +51,21 @@ def test_no_regions_is_safe(monkeypatch):
     assert camera_worker.unknown_detections_per_region([]) == []
 
 
+def test_region_crop_detection_counts_in_assigned_zone_even_if_box_crosses_edge(monkeypatch):
+    monkeypatch.setattr(camera_worker.database, "get_all_products", lambda: [
+        {"product_id": "mirinda_apple", "camera_label": "Mirinda_apple"},
+    ])
+    monkeypatch.setattr(config, "SHELF_REGIONS", {
+        "mirinda-apple": {"box": (400, 300, 800, 600), "model_labels": ["Mirinda_apple"]},
+    })
+    detection = {
+        "label": "Mirinda_apple", "conf": 0.28, "source": "custom",
+        "box": [370, 350, 410, 390], "region_id": "mirinda-apple",
+    }
+
+    assert camera_worker.count_detections_per_region([detection]) == {"mirinda_apple": 1}
+
+
 def test_explain_detection_reports_discarded_coco_and_label_mismatch(monkeypatch):
     monkeypatch.setattr(camera_worker.database, "get_all_products", lambda: [
         {"product_id": "apple", "camera_label": "apple"},

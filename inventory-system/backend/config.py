@@ -31,6 +31,11 @@ SMS_DISPATCH_BUDGET_SECONDS = 10    # target ceiling for Objective 4
 # --- Detection ---
 CUSTOM_CONFIDENCE_THRESHOLD = 0.35
 COCO_CONFIDENCE_THRESHOLD = 0.40
+# If a full-frame pass misses a configured shelf item, retry that empty zone as
+# a crop. Crops show the product at a larger effective scale, so allow a lower
+# confidence threshold there; stable-count reconciliation still gates changes.
+REGION_CUSTOM_CONFIDENCE_THRESHOLD = 0.25
+REGION_COCO_CONFIDENCE_THRESHOLD = 0.30
 CONFIDENCE_THRESHOLD = CUSTOM_CONFIDENCE_THRESHOLD
 CUSTOM_MODEL_CLASSES = ("Gloria_biscuits", "Gunanzi_snack", "Mirinda_apple")
 COCO_ALLOWED_CLASSES = {"apple", "banana", "orange"}

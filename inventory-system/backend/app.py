@@ -528,11 +528,13 @@ def api_camera_scan():
         frame = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
         if frame is None or frame.size == 0:
             return jsonify({"error": "The webcam frame could not be decoded. Wait for the camera preview, then try again."}), 400
-        found = get_detector().detect(frame)
+        found = get_detector().detect_in_regions(frame, config.SHELF_REGIONS)
         detections = [{"label": item["label"], "conf": round(item["conf"], 3),
                        "confidence": round(item["conf"], 3),
                        "box": [round(value) for value in item["box"]],
-                       "source": item["source"]} for item in found]
+                   "source": item["source"],
+                   **({"region_id": item["region_id"]} if item.get("region_id") else {})}
+                  for item in found]
         counts = count_detections_per_region(found, frame.shape)
         updates = _browser_shelf_reconciler.reconcile(counts)
         unknown = unknown_detections_per_region(found, frame.shape)

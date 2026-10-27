@@ -167,8 +167,91 @@
   }
   async function renderUsers() { if (!['manager','admin'].includes(user.role)) return; try { const users = await json('/api/users'); $('#users-list').innerHTML = users.map(x=>`<div class="alert-row"><strong>${escape(x.full_name)}</strong> · ${escape(x.username)} <span class="muted">${escape(x.role)}</span>${x.id !== user.user_id && (user.role === 'admin' || x.role !== 'admin') ? `<button class="delete-user" data-user-id="${x.id}" data-name="${escape(x.full_name)}">Delete</button>` : ''}</div>`).join(''); $('#users-list').querySelectorAll('.delete-user').forEach(el => el.onclick = async () => { if (!confirm(`Delete ${el.dataset.name}? This cannot be undone.`)) return; try { await json(`/api/users/${el.dataset.userId}`, {method:'DELETE'}); message('User deleted.'); renderUsers(); } catch(err) { message(err.message); } }); } catch(err) { message(err.message); } }
 
-  function drawDetections(detections, video) { const canvas=$('#detection-overlay'), rect=video.getBoundingClientRect(); canvas.width=video.videoWidth; canvas.height=video.videoHeight; canvas.style.width=`${rect.width}px`; canvas.style.height=`${rect.height}px`; const ctx=canvas.getContext('2d'); ctx.clearRect(0,0,canvas.width,canvas.height); ctx.lineWidth=3; ctx.font='16px sans-serif'; detections.forEach(d=>{const [x1,y1,x2,y2]=d.box, color=d.source==='coco'?'#ffad45':'#35df96';ctx.strokeStyle=color;ctx.fillStyle=color;ctx.strokeRect(x1,y1,x2-x1,y2-y1);ctx.fillText(`${d.label} · ${d.source} ${Math.round(d.confidence*100)}%`,x1,Math.max(16,y1-5));}); }
-  async function scan() { const cameraViewActive=$('#camera-view').classList.contains('active'); const video=cameraViewActive ? $('#camera-video') : $('#mini-camera'); if (!stream || scanBusy || video.readyState < 2 || !video.videoWidth) return; scanBusy=true; try { const canvas=document.createElement('canvas'); canvas.width=video.videoWidth; canvas.height=video.videoHeight; canvas.getContext('2d').drawImage(video,0,0); if(cameraViewActive) $('#camera-status').textContent='Scanning…'; const result=await json('/api/camera/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image:canvas.toDataURL('image/jpeg',.85)})}); if(cameraViewActive) { drawDetections(result.detections || [],video); if(result.supported_classes) $('#camera-supported-classes').textContent=`Supported: ${result.supported_classes.join(', ')}`; $('#detections').innerHTML=(result.detections || []).map(d=>`<div class="detection"><strong>${escape(d.label)}</strong> · ${escape(d.source)} · ${Math.round(d.confidence*100)}%</div>`).join('') || 'No objects detected in this frame.'; $('#camera-notice').textContent=result.notice || 'Monitoring'; $('#camera-status').textContent=Object.keys(result.inventory_updates || {}).length ? 'Inventory updated' : 'Live monitoring'; } if(Object.keys(result.inventory_updates || {}).length) { message(result.notice); refresh(); } } catch(err) { if(cameraViewActive) { $('#camera-status').textContent='Scan failed'; $('#camera-notice').textContent=err.message; } } finally { scanBusy=false; } }
+  function drawDetections(detections, video, regions = {}, counts = {}) {
+    const canvas = $('#detection-overlay');
+    const rect = video.getBoundingClientRect();
+    if (!video.videoWidth || !video.videoHeight || !rect.width || !rect.height) return;
+    canvas.width = Math.round(rect.width);
+    canvas.height = Math.round(rect.height);
+    canvas.style.width = `${rect.width}px`;
+    canvas.style.height = `${rect.height}px`;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const scale = Math.max(canvas.width / video.videoWidth, canvas.height / video.videoHeight);
+    const offsetX = (canvas.width - video.videoWidth * scale) / 2;
+    const offsetY = (canvas.height - video.videoHeight * scale) / 2;
+    const toCanvas = (x, y) => [x * scale + offsetX, y * scale + offsetY];
+    const regionColors = ['#35df96', '#57b7ff', '#ffd166', '#ff8b6b', '#c69cff', '#66d9e8'];
+    ctx.font = 'bold 13px sans-serif';
+    Object.entries(regions).forEach(([productId, definition], index) => {
+      const box = definition.box || definition;
+      if (!Array.isArray(box) || box.length !== 4) return;
+      const [x1, y1] = toCanvas(box[0] * video.videoWidth / 1280, box[1] * video.videoHeight / 720);
+      const [x2, y2] = toCanvas(box[2] * video.videoWidth / 1280, box[3] * video.videoHeight / 720);
+      const color = regionColors[index % regionColors.length];
+      const name = productId.replace(/[-_]+/g, ' ').replace(/\b\w/g, char => char.toUpperCase());
+      const countEntry = Object.entries(counts).find(([id]) => id.replace(/[^a-z0-9]/gi, '').toLowerCase() === productId.replace(/[^a-z0-9]/gi, '').toLowerCase());
+      const caption = `${name} · ${countEntry?.[1] ?? counts[productId] ?? 0}`;
+      ctx.fillStyle = '#101820cc';
+      ctx.fillRect(x1, y1, Math.max(100, ctx.measureText(caption).width + 12), 22);
+      ctx.fillStyle = color;
+      ctx.fillText(caption, x1 + 6, y1 + 16);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    });
+    ctx.font = 'bold 13px sans-serif';
+    detections.forEach(detection => {
+      const [x1, y1] = toCanvas(detection.box[0], detection.box[1]);
+      const [x2, y2] = toCanvas(detection.box[2], detection.box[3]);
+      const color = detection.source === 'coco' ? '#ffad45' : '#35df96';
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      const zone = detection.region_id ? ` · ${detection.region_id.replace(/[-_]+/g, ' ')}` : '';
+      ctx.fillText(`${detection.label}${zone} ${Math.round(detection.confidence * 100)}%`, x1, Math.max(15, y1 - 5));
+    });
+  }
+  async function scan() {
+    const cameraViewActive = $('#camera-view').classList.contains('active');
+    const video = cameraViewActive ? $('#camera-video') : $('#mini-camera');
+    if (!stream || scanBusy || video.readyState < 2 || !video.videoWidth) return;
+    scanBusy = true;
+    try {
+      const frame = document.createElement('canvas');
+      frame.width = video.videoWidth;
+      frame.height = video.videoHeight;
+      frame.getContext('2d').drawImage(video, 0, 0);
+      if (cameraViewActive) $('#camera-status').textContent = 'Scanning…';
+      const result = await json('/api/camera/scan', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({image: frame.toDataURL('image/jpeg', .85)})
+      });
+      if (cameraViewActive) {
+        const detections = result.detections || [];
+        const regions = result.shelf_regions || {};
+        const counts = result.observed_counts || {};
+        drawDetections(detections, video, regions, counts);
+        $('#region-counts').innerHTML = Object.entries(regions).map(([productId]) => {
+          const label = productId.replace(/[-_]+/g, ' ').replace(/\b\w/g, char => char.toUpperCase());
+          const countEntry = Object.entries(counts).find(([id]) => id.replace(/[^a-z0-9]/gi, '').toLowerCase() === productId.replace(/[^a-z0-9]/gi, '').toLowerCase());
+          return `<div class="region-count"><strong>${escape(label)}</strong><span>${Number(countEntry?.[1] ?? counts[productId] ?? 0)} detected</span></div>`;
+        }).join('') || 'No shelf partitions configured.';
+        if (result.supported_classes) $('#camera-supported-classes').textContent = `Supported: ${result.supported_classes.join(', ')}`;
+        $('#detections').innerHTML = detections.map(detection => `<div class="detection"><strong>${escape(detection.label)}</strong> · ${escape(detection.source)} · ${Math.round(detection.confidence * 100)}%</div>`).join('') || 'No objects detected in this frame.';
+        $('#camera-notice').textContent = result.notice || 'Monitoring';
+        $('#camera-status').textContent = Object.keys(result.inventory_updates || {}).length ? 'Inventory updated' : 'Live monitoring';
+      }
+      if (Object.keys(result.inventory_updates || {}).length) { message(result.notice); refresh(); }
+    } catch (err) {
+      if (cameraViewActive) {
+        $('#camera-status').textContent = 'Scan failed';
+        $('#camera-notice').textContent = err.message;
+      }
+    } finally { scanBusy = false; }
+  }
   function stopCamera() { if(stream) stream.getTracks().forEach(track=>track.stop()); stream=null; $('#camera-video').srcObject=null; $('#mini-camera').srcObject=null; $('#camera-toggle').textContent='Open camera'; $('#camera-chip').textContent='Camera off'; $('#camera-chip').classList.add('off'); $('#persistent-camera').style.display='none'; $('#camera-placeholder').hidden=false; $('#camera-placeholder').textContent='Click Open camera to start the live shelf stream.'; $('#camera-status').textContent='Camera off'; $('#camera-notice').textContent='The camera is closed. Click Open camera when you are ready to resume monitoring.'; $('#detections').textContent='No detections yet.'; const canvas=$('#detection-overlay'); canvas.getContext('2d').clearRect(0,0,canvas.width,canvas.height); }
   async function toggleCamera() { if(serverCameraOwnsDevice) return message('The backend camera worker is enabled. Disable START_CAMERA_WORKER_ON_BOOT to use on-demand site streaming.'); if(stream) { stopCamera(); return; } try { if(!navigator.mediaDevices?.getUserMedia) throw new Error('Camera access is unavailable. Open this site on localhost or through HTTPS and check browser permissions.'); stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false}); $('#camera-video').srcObject=stream; $('#mini-camera').srcObject=stream; await $('#camera-video').play(); $('#mini-camera').play().catch(()=>{}); $('#camera-placeholder').hidden=true; $('#camera-toggle').textContent='Close camera'; $('#camera-chip').textContent='Camera live'; $('#camera-chip').classList.remove('off'); $('#mini-camera-label').textContent='Camera is live'; $('#camera-status').textContent='Live monitoring'; $('#camera-notice').textContent='Live video and shelf detection remain active as you navigate between modules.'; scan(); } catch(err) { if(stream) stopCamera(); $('#camera-status').textContent='Camera unavailable'; $('#camera-notice').textContent=err.name === 'NotAllowedError' ? 'Allow camera permission in your browser and try again.' : err.message; } }
 
